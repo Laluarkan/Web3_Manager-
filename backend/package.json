@@ -10,6 +10,7 @@
     "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
+    "sync:players": "tsx src/scripts/sync-global-players.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

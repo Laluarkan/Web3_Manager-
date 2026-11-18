@@ -39,13 +39,13 @@ model Club {
 }
 
 model Player {
-  id             Int      @id @default(autoincrement())
-  externalKey    String   @unique
+  id             Int       @id @default(autoincrement())
+  externalKey    String    @unique
   name           String
   nationality    String
   clubId         Int
-  position       String   // GK | DF | MF | FW
-  detailPosition String   // GK | LB | CB | RB | CDM | CM | CAM | LW | ST | RW
+  position       String    // GK | DF | MF | FW
+  detailPosition String    // GK | LB | CB | RB | CDM | CM | CAM | LW | ST | RW
   overall        Int
   pace           Int
   shooting       Int
@@ -53,10 +53,15 @@ model Player {
   dribbling      Int
   defending      Int
   physical       Int
-  liveForm       String   @default("C") // A | B | C | D | E
+  liveForm       String    @default("C") // A | B | C | D | E
+  appearances    Int       @default(0)
+  goals          Int       @default(0)
+  assists        Int       @default(0)
+  saves          Int       @default(0)
   photoUrl       String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  lastSyncedAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   club      Club       @relation(fields: [clubId], references: [id])
   userCards UserCard[]

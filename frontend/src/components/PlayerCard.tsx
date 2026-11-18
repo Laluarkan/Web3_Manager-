@@ -73,8 +73,16 @@ export function PlayerCard({ card, compact = false, selected = false, onClick }:
           </span>
         </div>
 
-        <div className="my-1 flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-slate-950/70 text-xs font-black text-emerald-300">
-          {initials}
+        <div className="my-1 flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-white/15 bg-slate-950/70 text-xs font-black text-emerald-300">
+          {card.player.club.logoUrl ? (
+            <img
+              src={card.player.club.logoUrl}
+              alt={card.player.club.name}
+              className="h-7 w-7 object-contain"
+            />
+          ) : (
+            initials
+          )}
         </div>
 
         <div className="w-full truncate text-center text-[10px] font-bold text-white">
@@ -130,8 +138,16 @@ export function PlayerCard({ card, compact = false, selected = false, onClick }:
       </div>
 
       <div className="my-3 flex items-center gap-3">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-white/20 bg-slate-950/70 text-sm font-black text-emerald-300">
-          {initials}
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-slate-950/70 text-sm font-black text-emerald-300">
+          {card.player.club.logoUrl ? (
+            <img
+              src={card.player.club.logoUrl}
+              alt={card.player.club.name}
+              className="h-9 w-9 object-contain"
+            />
+          ) : (
+            initials
+          )}
         </div>
         <div className="min-w-0">
           <div className="truncate text-sm font-extrabold text-white">{card.player.name}</div>

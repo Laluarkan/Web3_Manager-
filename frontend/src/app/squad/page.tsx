@@ -472,6 +472,17 @@ export default function SquadPage() {
 
             <PlayerCard card={inspectCard} />
 
+            {/* Statistik Nyata Musim Berjalan */}
+            <div className="mt-3 flex items-center justify-between rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[11px] text-slate-300">
+              <span>Statistik Musim Ini:</span>
+              <span className="font-bold text-emerald-300">
+                {inspectCard.player.appearances ?? 0} Main •{" "}
+                {inspectCard.position === "GK"
+                  ? `${inspectCard.player.saves ?? 0} Saves`
+                  : `${inspectCard.player.goals ?? 0} Gol • ${inspectCard.player.assists ?? 0} Assist`}
+              </span>
+            </div>
+
             {/* 6 Atribut ala eFootball / EA FC */}
             <div className="mt-4 grid grid-cols-3 gap-2 text-center">
               {[

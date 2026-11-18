@@ -11,15 +11,21 @@ Dokumen ini membahas secara lengkap cara mendapatkan **data statistik pemain bol
 
 ## 1. Sumber Data Statistik Pemain Dunia Gratis (Multi-Liga Global)
 
-Untuk mendapatkan **1) rating lengkap ala eFootball/EA FC** dan **2) update statistik performa mingguan di seluruh dunia** secara gratis, kita memanfaatkan sumber-sumber berikut:
+**Pipeline penarikan data pemain dunia nyata sudah aktif** melalui script `backend/src/scripts/sync-global-players.ts` (`npm run sync:players`) menggunakan **ESPN Public Soccer API (100% gratis, tanpa API key, JSON resmi)**:
 
-| Sumber Data | Cakupan Dunia | Biaya | Isi Data Pemain | Peran di Game Kita |
-| :--- | :--- | :--- | :--- | :--- |
-| **1. EA FC / SoFIFA Database** *(Dataset publik Kaggle / GitHub / scraping berkala)* | **Global: 17.000+ pemain dari 30+ liga dunia** (Eropa, Amerika Selatan, MLS, Saudi, J-League, K-League, dll.) | **100% Gratis** | Rating lengkap ala game bola: **OVR, Pace, Shooting, Passing, Dribbling, Defending, Physicality**, posisi detail (`ST`, `LW`, `CM`, `CB`, `GK`), umur, klub, negara, foto. | **Base Rating Awal Musim** (dasar statistik seluruh kartu `BASE`). |
-| **2. FBref (berbasis data Opta)** *(via scraper terjadwal / Python `soccerdata`)* | **Global: Puluhan liga dunia** (Top 5 Eropa, Eredivisie, Liga Portugal, Brasileirão, Argentina, MLS, Liga MX, Liga Champions, dll.) | **100% Gratis** *(wajib rate-limit sopan, 1x seminggu)* | Statistik performa mingguan sangat akurat: **gol, assist, menit main, xG, xA, shots, key passes, tackles, interceptions, saves kiper**. | **Update Statistik Mingguan Global** untuk hitung skor performa & kandidat **`POTW`**. |
-| **3. Transfermarkt Datasets** *(repo terbuka `dcaribou/transfermarkt-datasets` di GitHub / Kaggle)* | **Global: 400+ klub & puluhan ribu pemain lintas liga** | **100% Gratis** *(update otomatis tiap minggu via dataset publik)* | Profil pemain, **perpindahan klub terbaru (bursa transfer)**, *market value*, gol, assist, kartu kuning/merah, menit main per musim/pekan. | **Update Transfer Klub & Statistik Mingguan** tanpa harus scraping berat sendiri! |
-| **4. Sofascore / FotMob (Public JSON Data)** | **Hampir seluruh liga dunia** (termasuk Eropa, Asia, Amerika Latin, Afrika) | **Gratis** *(unofficial endpoint, wajib cron lambat & di-cache)* | **Match Rating mingguan (skala 1.0 – 10.0)**, gol, assist, *Team of The Week* di berbagai liga dunia. | **Referensi Live Form (A–E)** dan rating mingguan lintas benua. |
-| **5. API-Football (API-Sports) — Free Plan** | **1.000+ liga seluruh dunia** | **Gratis** (100 request/hari) | API resmi & stabil: profil pemain, foto resmi, klub, dan statistik pemain. | **Pelengkap resmi** (misal ambil foto/profil pemain tertentu yang kurang, dengan cache database). |
+- **Cakupan 13 Liga Dunia sekaligus:** Premier League (`eng.1`), La Liga (`esp.1`), Serie A (`ita.1`), Bundesliga (`ger.1`), Ligue 1 (`fra.1`), Eredivisie (`ned.1`), Primeira Liga (`por.1`), Brasileirão (`bra.1`), Liga Profesional Argentina (`arg.1`), MLS (`usa.1`), Saudi Pro League (`ksa.1`), J1 League (`jpn.1`), dan **Liga 1 Indonesia (`idn.1`)**.
+- **Data yang ditarik langsung:** Ribuan pemain aktif musim berjalan, nama lengkap, kewarganegaraan, posisi, klub & **logo klub PNG resmi**, serta statistik live (`appearances`, `goals`, `assists`, `saves`, `shotsOnTarget`, kartu) yang otomatis dihitung menjadi **OVR, 6 atribut (`PAC/SHO/PAS/DRI/DEF/PHY`), dan Live Form (`A`–`E`)**.
+- **Disimpan di Database Dulu (Bukan Blockchain):** Master data ribuan pemain dunia disimpan di tabel `Player` & `Club` di **Database** (SQLite lokal → Neon PostgreSQL), sedangkan **Blockchain hanya menyimpan NFT milik user** (`tokenId` merujuk ke `playerId`).
+- **Update Mingguan Aman:** Cukup jalankan `npm run sync:players` setiap minggu (atau via GitHub Actions Cron gratis). Script memakai `UPSERT` berdasarkan `externalKey` (`espn-<id>`) sehingga **`Player.id` tidak pernah berubah** dan referensi `playerId` pada NFT on-chain tetap aman 100%.
+
+### Sumber Tambahan Opsional (Untuk Pengembangan Lanjutan)
+
+| Sumber Data | Cakupan Dunia | Biaya | Peran Tambahan |
+| :--- | :--- | :--- | :--- |
+| **1. ESPN Public Soccer API** *(Sudah Aktif di `sync:players`)* | **Global: 13+ liga dunia (Eropa, Brasil, Argentina, MLS, Saudi, Jepang, Indonesia)** | **100% Gratis**, tanpa API Key | Tarik daftar klub + logo PNG + ribuan pemain & statistik musim berjalan secara rutin tiap minggu. |
+| **2. EA FC / SoFIFA Database** *(Dataset publik Kaggle / CSV)* | **Global: 17.000+ pemain dari 30+ liga dunia** | **100% Gratis** | Opsional jika ingin mencocokkan atribut `Pace/Dribbling/Physical` persis angka EA FC. |
+| **3. Transfermarkt Datasets** *(repo terbuka `dcaribou/transfermarkt-datasets`)* | **Global: 400+ klub lintas liga** | **100% Gratis** | Referensi tambahan *market value* & riwayat transfer. |
+| **4. API-Football (API-Sports) — Free Plan** | **1.000+ liga seluruh dunia** | **Gratis** (100 request/hari) | Opsional untuk menambah foto wajah (*headshot*) pemain tertentu dengan cache database. |
 
 ---
 

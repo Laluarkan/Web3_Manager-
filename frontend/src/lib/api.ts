@@ -33,6 +33,10 @@ export interface PlayerData {
   defending: number;
   physical: number;
   liveForm: string;
+  appearances?: number;
+  goals?: number;
+  assists?: number;
+  saves?: number;
   photoUrl?: string | null;
   club: ClubData;
 }
