@@ -1,17 +1,26 @@
-# Python / Django
-__pycache__/
-*.py[cod]
-db.sqlite3
-venv/
-.env
-
-# Node / React
+# Dependencies
 node_modules/
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+
+# Build & Cache
 dist/
 build/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
 .DS_Store
 
-# Hardhat
-blockchain/artifacts/
-blockchain/cache/
-blockchain/typechain-types/
+# Hardhat (contracts/)
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+contracts/deployments/
+
+# Prisma SQLite Local DB
+backend/prisma/*.db
+backend/prisma/*.db-journal

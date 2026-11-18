@@ -1,0 +1,257 @@
+import { expect } from "chai";
+import { ethers } from "hardhat";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+
+describe("W3 Football Manager Contracts (KANS + NFT + Marketplace)", function () {
+  async function deployFixture() {
+    const [admin, backendSigner, treasury, playerA, playerB] = await ethers.getSigners();
+
+    const KansToken = await ethers.getContractFactory("KansToken");
+    const kansToken = await KansToken.deploy(admin.address);
+
+    const FootballCardNFT = await ethers.getContractFactory("FootballCardNFT");
+    const cardNft = await FootballCardNFT.deploy(
+      admin.address,
+      backendSigner.address,
+      "http://localhost:4000/api/metadata/"
+    );
+
+    const CardMarketplace = await ethers.getContractFactory("CardMarketplace");
+    const marketplace = await CardMarketplace.deploy(
+      await cardNft.getAddress(),
+      await kansToken.getAddress(),
+      treasury.address,
+      admin.address
+    );
+
+    // Beri saldo KANS ke playerB untuk tes beli di marketplace
+    await kansToken.mint(playerB.address, ethers.parseEther("5000"));
+
+    return { kansToken, cardNft, marketplace, admin, backendSigner, treasury, playerA, playerB };
+  }
+
+  // Helper membuat 11 kartu starter pack formasi 4-3-3 (1 GK, 4 DF, 3 MF, 3 FW)
+  function buildStarterPackCards() {
+    // 9 COMMON, 1 RARE, 1 EPIC (simulasi hoki 10%)
+    const positions = [0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 3];
+    return positions.map((pos, idx) => ({
+      playerId: 100 + idx,
+      position: pos,
+      baseOverall: idx === 10 ? 84 : idx === 9 ? 78 : 70,
+      rarity: idx === 10 ? 2 : idx === 9 ? 1 : 0, // 0=COMMON, 1=RARE, 2=EPIC
+      edition: 0, // BASE
+      season: 2026,
+    }));
+  }
+
+  async function signStarterVoucher(
+    signer: any,
+    nftAddress: string,
+    recipient: string,
+    cards: any[],
+    nonce: number,
+    deadline: number
+  ) {
+    const network = await ethers.provider.getNetwork();
+    const domain = {
+      name: "W3FootballCardNFT",
+      version: "1",
+      chainId: network.chainId,
+      verifyingContract: nftAddress,
+    };
+
+    const types = {
+      StarterClaim: [
+        { name: "recipient", type: "address" },
+        { name: "cards", type: "CardInput[]" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint256" },
+      ],
+      CardInput: [
+        { name: "playerId", type: "uint32" },
+        { name: "position", type: "uint8" },
+        { name: "baseOverall", type: "uint8" },
+        { name: "rarity", type: "uint8" },
+        { name: "edition", type: "uint8" },
+        { name: "season", type: "uint16" },
+      ],
+    };
+
+    const value = { recipient, cards, nonce, deadline };
+    return signer.signTypedData(domain, types, value);
+  }
+
+  describe("1. KansToken (ERC-20)", function () {
+    it("memiliki nama, simbol, dan batas max supply 100 juta KANS", async function () {
+      const { kansToken } = await loadFixture(deployFixture);
+      expect(await kansToken.name()).to.equal("Kans Token");
+      expect(await kansToken.symbol()).to.equal("KANS");
+      expect(await kansToken.cap()).to.equal(ethers.parseEther("100000000"));
+    });
+
+    it("menolak mint oleh akun tanpa MINTER_ROLE dan menolak melebihi cap", async function () {
+      const { kansToken, playerA } = await loadFixture(deployFixture);
+      await expect(
+        kansToken.connect(playerA).mint(playerA.address, ethers.parseEther("10"))
+      ).to.be.reverted;
+
+      await expect(
+        kansToken.mint(playerA.address, ethers.parseEther("100000000"))
+      ).to.be.reverted;
+    });
+  });
+
+  describe("2. FootballCardNFT (Starter Pack 11 Kartu & Keamanan EIP-712)", function () {
+    it("berhasil klaim 11 kartu Starter Pack 4-3-3 dengan voucher valid dari backend", async function () {
+      const { cardNft, backendSigner, playerA } = await loadFixture(deployFixture);
+      const cards = buildStarterPackCards();
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const nonce = 1;
+
+      const sig = await signStarterVoucher(
+        backendSigner,
+        await cardNft.getAddress(),
+        playerA.address,
+        cards,
+        nonce,
+        deadline
+      );
+
+      await expect(cardNft.connect(playerA).claimStarterPack(cards, nonce, deadline, sig))
+        .to.emit(cardNft, "StarterPackClaimed");
+
+      expect(await cardNft.balanceOf(playerA.address)).to.equal(11);
+      expect(await cardNft.hasClaimedStarter(playerA.address)).to.equal(true);
+
+      const tokens = await cardNft.getTokensOfOwner(playerA.address);
+      expect(tokens.length).to.equal(11);
+
+      const epicCard = await cardNft.getCard(tokens[10]);
+      expect(epicCard.playerId).to.equal(110);
+      expect(epicCard.rarity).to.equal(2); // EPIC
+      expect(epicCard.baseOverall).to.equal(84);
+      expect(epicCard.level).to.equal(1);
+      expect(await cardNft.tokenURI(tokens[0])).to.equal("http://localhost:4000/api/metadata/1");
+    });
+
+    it("menolak klaim Starter Pack kedua kali atau dengan tanda tangan palsu", async function () {
+      const { cardNft, backendSigner, playerA, playerB } = await loadFixture(deployFixture);
+      const cards = buildStarterPackCards();
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+
+      // Tanda tangan palsu (bukan dari backendSigner)
+      const fakeSig = await signStarterVoucher(
+        playerA,
+        await cardNft.getAddress(),
+        playerA.address,
+        cards,
+        1,
+        deadline
+      );
+      await expect(
+        cardNft.connect(playerA).claimStarterPack(cards, 1, deadline, fakeSig)
+      ).to.be.revertedWith("Tanda tangan voucher tidak valid");
+
+      // Klaim pertama valid
+      const validSig = await signStarterVoucher(
+        backendSigner,
+        await cardNft.getAddress(),
+        playerA.address,
+        cards,
+        2,
+        deadline
+      );
+      await cardNft.connect(playerA).claimStarterPack(cards, 2, deadline, validSig);
+
+      // Klaim kedua oleh wallet yang sama ditolak
+      const secondSig = await signStarterVoucher(
+        backendSigner,
+        await cardNft.getAddress(),
+        playerA.address,
+        cards,
+        3,
+        deadline
+      );
+      await expect(
+        cardNft.connect(playerA).claimStarterPack(cards, 3, deadline, secondSig)
+      ).to.be.revertedWith("Starter pack sudah pernah diklaim");
+
+      // Voucher milik playerA tidak bisa dipakai playerB
+      await expect(
+        cardNft.connect(playerB).claimStarterPack(cards, 3, deadline, secondSig)
+      ).to.be.revertedWith("Tanda tangan voucher tidak valid");
+    });
+  });
+
+  describe("3. CardMarketplace (Jual-Beli NFT Pakai KANS)", function () {
+    it("berhasil list, beli kartu pakai KANS, potong fee 2.5% ke treasury, dan pindahkan NFT", async function () {
+      const { kansToken, cardNft, marketplace, backendSigner, treasury, playerA, playerB } =
+        await loadFixture(deployFixture);
+
+      // PlayerA klaim starter pack (tokenId 1..11)
+      const cards = buildStarterPackCards();
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const sig = await signStarterVoucher(
+        backendSigner,
+        await cardNft.getAddress(),
+        playerA.address,
+        cards,
+        10,
+        deadline
+      );
+      await cardNft.connect(playerA).claimStarterPack(cards, 10, deadline, sig);
+
+      const tokenIdToSell = 11n; // Kartu EPIC milik PlayerA
+      const price = ethers.parseEther("400"); // 400 KANS
+
+      // PlayerA approve marketplace & list kartu
+      await cardNft.connect(playerA).setApprovalForAll(await marketplace.getAddress(), true);
+      await expect(marketplace.connect(playerA).listCard(tokenIdToSell, price))
+        .to.emit(marketplace, "CardListed")
+        .withArgs(1, playerA.address, tokenIdToSell, price);
+
+      // PlayerB approve KANS & beli kartu
+      await kansToken.connect(playerB).approve(await marketplace.getAddress(), price);
+      await expect(marketplace.connect(playerB).buyCard(1))
+        .to.emit(marketplace, "CardSold")
+        .withArgs(1, playerA.address, playerB.address, tokenIdToSell, price, ethers.parseEther("10"));
+
+      // Cek kepemilikan NFT pindah ke PlayerB
+      expect(await cardNft.ownerOf(tokenIdToSell)).to.equal(playerB.address);
+      expect(await cardNft.balanceOf(playerA.address)).to.equal(10);
+      expect(await cardNft.balanceOf(playerB.address)).to.equal(1);
+
+      // Cek distribusi KANS: fee 2.5% (10 KANS) ke treasury, 97.5% (390 KANS) ke PlayerA
+      expect(await kansToken.balanceOf(treasury.address)).to.equal(ethers.parseEther("10"));
+      expect(await kansToken.balanceOf(playerA.address)).to.equal(ethers.parseEther("390"));
+      expect(await kansToken.balanceOf(playerB.address)).to.equal(ethers.parseEther("4600"));
+    });
+
+    it("berhasil update harga dan membatalkan listing oleh penjual", async function () {
+      const { cardNft, marketplace, admin, playerA } = await loadFixture(deployFixture);
+
+      await cardNft.connect(admin).mintCard(playerA.address, {
+        playerId: 999,
+        position: 3,
+        baseOverall: 91,
+        rarity: 3, // LEGENDARY
+        edition: 4, // ICONIC
+        season: 2026,
+      });
+
+      await cardNft.connect(playerA).setApprovalForAll(await marketplace.getAddress(), true);
+      await marketplace.connect(playerA).listCard(1, ethers.parseEther("1000"));
+
+      await expect(marketplace.connect(playerA).updatePrice(1, ethers.parseEther("850")))
+        .to.emit(marketplace, "ListingPriceUpdated")
+        .withArgs(1, ethers.parseEther("850"));
+
+      await expect(marketplace.connect(playerA).cancelListing(1))
+        .to.emit(marketplace, "ListingCanceled")
+        .withArgs(1, playerA.address, 1);
+
+      const listing = await marketplace.listings(1);
+      expect(listing.active).to.equal(false);
+    });
+  });
+});
