@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useReadContract } from "wagmi";
 import { formatEther } from "viem";
-import { Coins, LogOut, Shield, ShoppingBag, Swords, LayoutDashboard, Wallet } from "lucide-react";
+import { Coins, LogOut, Package, Shield, ShoppingBag, Swords, LayoutDashboard, Wallet } from "lucide-react";
 import { useAuth } from "./Providers";
 import { CONTRACT_ADDRESSES, KANS_TOKEN_ABI } from "@/lib/contracts";
 import { apiRequest } from "@/lib/api";
@@ -55,7 +55,8 @@ export function Navbar() {
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
     { href: "/squad", label: "Squad 4-3-3", icon: Shield },
-    { href: "/match", label: "Match Gratis", icon: Swords },
+    { href: "/match", label: "Arena Match", icon: Swords },
+    { href: "/packs", label: "Pack Shop", icon: Package },
     { href: "/market", label: "Marketplace", icon: ShoppingBag },
   ];
 

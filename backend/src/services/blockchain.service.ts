@@ -20,6 +20,7 @@ const CARD_NFT_ABI = [
   "function hasClaimedStarter(address account) view returns (bool)",
   "function getTokensOfOwner(address owner) view returns (uint256[])",
   "function getCard(uint256 tokenId) view returns (tuple(uint32 playerId, uint8 position, uint8 baseOverall, uint8 level, uint8 rarity, uint8 edition, uint16 season, uint64 mintedAt))",
+  "function upgradeCardLevel(uint256 tokenId, uint8 newLevel) external",
 ];
 
 const MARKETPLACE_ABI = [
@@ -196,4 +197,87 @@ export async function mintTestKansFaucet(walletAddress: string, amountKans = "10
   const tx = await kans.mint(walletAddress, ethers.parseEther(amountKans));
   const receipt = await tx.wait();
   return { txHash: receipt.hash, amountKans };
+}
+
+/**
+ * Menandatangani voucher EIP-712 untuk membuka 1 Pack NFT di CardPackShop.sol.
+ */
+export async function signPackOpenVoucher(
+  buyer: string,
+  card: {
+    playerId: number;
+    position: string;
+    baseOverall: number;
+    rarity: string;
+    edition: string;
+    season: number;
+  },
+  priceKans: string
+) {
+  const signer = getBackendSigner();
+  const nonce = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  const deadline = Math.floor(Date.now() / 1000) + 1800;
+  const priceWei = ethers.parseEther(priceKans);
+
+  const formattedCard: VoucherCardInput = {
+    playerId: card.playerId,
+    position: POSITION_TO_INDEX[card.position] ?? 0,
+    baseOverall: card.baseOverall,
+    rarity: RARITY_TO_INDEX[card.rarity] ?? 0,
+    edition: EDITION_TO_INDEX[card.edition] ?? 0,
+    season: card.season,
+  };
+
+  const domain = {
+    name: "W3CardPackShop",
+    version: "1",
+    chainId: BigInt(env.chainId),
+    verifyingContract: env.packShopAddress,
+  };
+
+  const types = {
+    PackOpen: [
+      { name: "buyer", type: "address" },
+      { name: "card", type: "CardInput" },
+      { name: "price", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    CardInput: [
+      { name: "playerId", type: "uint32" },
+      { name: "position", type: "uint8" },
+      { name: "baseOverall", type: "uint8" },
+      { name: "rarity", type: "uint8" },
+      { name: "edition", type: "uint8" },
+      { name: "season", type: "uint16" },
+    ],
+  };
+
+  const signature = await signer.signTypedData(domain, types, {
+    buyer,
+    card: formattedCard,
+    price: priceWei,
+    nonce,
+    deadline,
+  });
+
+  return {
+    card: formattedCard,
+    priceKans,
+    priceWei: priceWei.toString(),
+    nonce,
+    deadline,
+    signature,
+    contractAddress: env.packShopAddress,
+  };
+}
+
+/**
+ * Menaikkan level kartu NFT langsung di Smart Contract FootballCardNFT.sol.
+ */
+export async function upgradeOnChainCardLevel(tokenId: number, newLevel: number) {
+  const nft = getCardNftContract(true);
+  const tx = await nft.upgradeCardLevel(tokenId, newLevel);
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash };
 }

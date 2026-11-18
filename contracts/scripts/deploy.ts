@@ -30,14 +30,32 @@ async function main() {
   const marketplace = await CardMarketplace.deploy(
     nftAddress,
     kansAddress,
-    deployer.address, // treasury awal
-    deployer.address  // owner
+    deployer.address,
+    deployer.address
   );
   await marketplace.waitForDeployment();
   const marketAddress = await marketplace.getAddress();
   console.log("CardMarketplace deployed to:", marketAddress);
 
-  // 4. Khusus Hardhat lokal: bagikan saldo uji coba KANS ke akun test
+  // 4. Deploy CardPackShop (Buka Pack NFT pakai KANS + Burn 50%)
+  const CardPackShop = await ethers.getContractFactory("CardPackShop");
+  const packShop = await CardPackShop.deploy(
+    nftAddress,
+    kansAddress,
+    deployer.address,
+    deployer.address,
+    deployer.address
+  );
+  await packShop.waitForDeployment();
+  const packShopAddress = await packShop.getAddress();
+  console.log("CardPackShop deployed to   :", packShopAddress);
+
+  // Beri hak MINTER_ROLE kepada CardPackShop agar bisa langsung mencetak NFT saat user buka pack
+  const MINTER_ROLE = await cardNft.MINTER_ROLE();
+  await (await cardNft.grantRole(MINTER_ROLE, packShopAddress)).wait();
+  console.log("Granted MINTER_ROLE on FootballCardNFT to CardPackShop");
+
+  // 5. Khusus Hardhat lokal: bagikan saldo uji coba KANS ke akun test
   if (network.name === "localhost" || network.name === "hardhat") {
     const testAmount = ethers.parseEther("10000");
     await (await kansToken.mint(deployer.address, ethers.parseEther("100000"))).wait();
@@ -51,7 +69,7 @@ async function main() {
     }
   }
 
-  // 5. Simpan alamat kontrak ke deployments/<network>.json agar mudah dibaca Backend & Frontend
+  // 6. Simpan alamat kontrak ke deployments/<network>.json
   const deploymentsDir = path.join(__dirname, "..", "deployments");
   fs.mkdirSync(deploymentsDir, { recursive: true });
   const outputPath = path.join(deploymentsDir, `${network.name}.json`);
@@ -67,6 +85,7 @@ async function main() {
           KansToken: kansAddress,
           FootballCardNFT: nftAddress,
           CardMarketplace: marketAddress,
+          CardPackShop: packShopAddress,
         },
       },
       null,

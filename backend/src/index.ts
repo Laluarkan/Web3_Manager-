@@ -4,6 +4,7 @@ import { env } from "./config/env";
 import authRoutes from "./routes/auth.routes";
 import squadRoutes from "./routes/squad.routes";
 import marketRoutes from "./routes/market.routes";
+import packsRoutes from "./routes/packs.routes";
 import { getTokenMetadata } from "./controllers/market.controller";
 
 const app = express();
@@ -27,6 +28,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/squad", squadRoutes);
 app.use("/api/market", marketRoutes);
+app.use("/api/packs", packsRoutes);
 app.get("/api/metadata/:tokenId", getTokenMetadata);
 
 app.listen(env.port, () => {

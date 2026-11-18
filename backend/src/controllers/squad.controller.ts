@@ -7,6 +7,7 @@ import { generateStarterPackForUser } from "../services/starter.service";
 import {
   fetchOnChainCardsOfOwner,
   signStarterPackVoucher,
+  upgradeOnChainCardLevel,
 } from "../services/blockchain.service";
 
 const updateLineupSchema = z.object({
@@ -448,5 +449,268 @@ export async function playFreeMatch(req: AuthRequest, res: Response) {
   } catch (err) {
     console.error("Free match error:", err);
     res.status(500).json({ error: "Gagal menjalankan simulasi pertandingan" });
+  }
+}
+
+/**
+ * Training / Level Up Kartu (Level 1 -> 10) memakai Poin Manager (EXP).
+ * Jika kartu sudah On-Chain NFT, level juga langsung dinaikkan di Smart Contract!
+ */
+export async function upgradeCard(req: AuthRequest, res: Response) {
+  try {
+    const userId = req.user!.id;
+    const cardId = String(req.params.cardId);
+
+    const [user, card] = await Promise.all([
+      prisma.user.findUnique({ where: { id: userId } }),
+      prisma.userCard.findFirst({
+        where: { id: cardId, userId },
+        include: { player: { include: { club: true } } },
+      }),
+    ]);
+
+    if (!user || !card) {
+      res.status(404).json({ error: "Kartu tidak ditemukan" });
+      return;
+    }
+    if (card.isListed) {
+      res.status(400).json({ error: "Kartu yang sedang dijual tidak dapat dilatih" });
+      return;
+    }
+    if (card.level >= 10) {
+      res.status(400).json({ error: "Kartu sudah mencapai level maksimal (Lv.10)" });
+      return;
+    }
+
+    const pointCost = card.level * 30;
+    if (user.freeMatchPoints < pointCost) {
+      res.status(400).json({
+        error: `Poin Manager kurang! Butuh ${pointCost} poin (Anda punya ${user.freeMatchPoints} poin). Main Match Gratis / PvP untuk kumpulkan poin.`,
+      });
+      return;
+    }
+
+    const newLevel = card.level + 1;
+    let txHash: string | null = null;
+
+    if (card.isOnChain && card.tokenId) {
+      const tx = await upgradeOnChainCardLevel(card.tokenId, newLevel);
+      txHash = tx.txHash;
+    }
+
+    const [updatedCard, updatedUser] = await prisma.$transaction([
+      prisma.userCard.update({
+        where: { id: card.id },
+        data: { level: newLevel },
+        include: { player: { include: { club: true } } },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: { freeMatchPoints: { decrement: pointCost } },
+        select: { freeMatchPoints: true },
+      }),
+    ]);
+
+    res.json({
+      message: card.isOnChain
+        ? `${card.player.name} naik ke Level ${newLevel} (+1 OVR) & tercatat On-Chain!`
+        : `${card.player.name} naik ke Level ${newLevel} (+1 OVR)!`,
+      card: updatedCard,
+      remainingPoints: updatedUser.freeMatchPoints,
+      txHash,
+    });
+  } catch (err: any) {
+    console.error("Upgrade card error:", err);
+    res.status(500).json({ error: err.message || "Gagal melatih kartu" });
+  }
+}
+
+/**
+ * Daftar klub pemain lain yang siap ditantang di Mode PvP Asynchronous.
+ */
+export async function getPvpOpponents(req: AuthRequest, res: Response) {
+  try {
+    const userId = req.user!.id;
+    const users = await prisma.user.findMany({
+      where: {
+        id: { not: userId },
+        hasClaimedStarter: true,
+      },
+      include: {
+        lineup: {
+          include: {
+            slots: {
+              include: { userCard: { include: { player: true } } },
+            },
+          },
+        },
+      },
+      take: 20,
+      orderBy: { freeMatchPoints: "desc" },
+    });
+
+    const opponents = users
+      .filter((u) => (u.lineup?.slots.length ?? 0) === 11)
+      .map((u) => {
+        const slots = u.lineup!.slots;
+        const teamOverall = Math.round(
+          slots.reduce((s, slot) => s + slot.userCard.baseOverall + (slot.userCard.level - 1), 0) /
+            11
+        );
+        const starSlot = [...slots].sort(
+          (a, b) =>
+            b.userCard.baseOverall + b.userCard.level - (a.userCard.baseOverall + a.userCard.level)
+        )[0];
+
+        return {
+          userId: u.id,
+          username: u.username,
+          teamOverall,
+          wins: u.freeMatchWins,
+          played: u.freeMatchPlayed,
+          points: u.freeMatchPoints,
+          starPlayer: starSlot?.userCard.player.name || "-",
+        };
+      });
+
+    res.json({ opponents });
+  } catch (err) {
+    console.error("Get PvP opponents error:", err);
+    res.status(500).json({ error: "Gagal memuat daftar lawan PvP" });
+  }
+}
+
+const pvpMatchSchema = z.object({
+  opponentUserId: z.string().min(1),
+  tactic: z.enum(["ATTACKING", "BALANCED", "DEFENSIVE"]).default("BALANCED"),
+});
+
+/**
+ * Simulasi PvP Asynchronous melawan formasi 4-3-3 milik pemain lain.
+ */
+export async function playPvpMatch(req: AuthRequest, res: Response) {
+  try {
+    const parsed = pvpMatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Data lawan PvP tidak valid" });
+      return;
+    }
+
+    const userId = req.user!.id;
+    if (parsed.data.opponentUserId === userId) {
+      res.status(400).json({ error: "Tidak bisa menantang klub sendiri" });
+      return;
+    }
+
+    const [myLineup, oppUser] = await Promise.all([
+      prisma.lineup.findUnique({
+        where: { userId },
+        include: { slots: { include: { userCard: { include: { player: true } } } } },
+      }),
+      prisma.user.findUnique({
+        where: { id: parsed.data.opponentUserId },
+        include: {
+          lineup: {
+            include: { slots: { include: { userCard: { include: { player: true } } } } },
+          },
+        },
+      }),
+    ]);
+
+    if (!myLineup || myLineup.slots.length !== 11) {
+      res.status(400).json({ error: "Lengkapi 11 pemain di formasi 4-3-3 Anda terlebih dahulu" });
+      return;
+    }
+    if (!oppUser?.lineup || oppUser.lineup.slots.length !== 11) {
+      res.status(404).json({ error: "Skuad lawan belum siap bertanding" });
+      return;
+    }
+
+    const calcPower = (slots: typeof myLineup.slots) =>
+      Math.round(
+        slots.reduce(
+          (sum, s) =>
+            sum + s.userCard.baseOverall + (s.userCard.level - 1) + (FORM_BONUS[s.userCard.player.liveForm] ?? 0),
+          0
+        ) / 11
+      );
+
+    const myRating = calcPower(myLineup.slots);
+    const oppRating = calcPower(oppUser.lineup.slots);
+    const diff = myRating - oppRating;
+    const { tactic } = parsed.data;
+    const attackMod = tactic === "ATTACKING" ? 1 : tactic === "DEFENSIVE" ? -1 : 0;
+
+    const myGoals = Math.max(
+      0,
+      Math.round(1.3 + diff * 0.09 + attackMod * 0.5 + (Math.random() * 2.4 - 0.8))
+    );
+    const oppGoals = Math.max(
+      0,
+      Math.round(1.2 - diff * 0.07 + attackMod * 0.4 + (Math.random() * 2.2 - 0.8))
+    );
+
+    const outcome = myGoals > oppGoals ? "WIN" : myGoals < oppGoals ? "LOSE" : "DRAW";
+    const earnedPoints = outcome === "WIN" ? 35 : outcome === "DRAW" ? 12 : 5;
+
+    const attackers = myLineup.slots
+      .map((s) => s.userCard.player)
+      .filter((p) => p.position === "FW" || p.position === "MF");
+    const scorers: string[] = [];
+    for (let g = 0; g < myGoals; g++) {
+      const scorer = attackers[Math.floor(Math.random() * attackers.length)];
+      const minute = Math.floor(Math.random() * 88) + 2;
+      scorers.push(`${scorer?.name || "Striker"} (${minute}')`);
+    }
+
+    const possession = Math.min(68, Math.max(35, 50 + Math.round(diff * 0.7)));
+
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        freeMatchPlayed: { increment: 1 },
+        freeMatchWins: outcome === "WIN" ? { increment: 1 } : undefined,
+        freeMatchPoints: { increment: earnedPoints },
+      },
+      select: { freeMatchPlayed: true, freeMatchWins: true, freeMatchPoints: true },
+    });
+
+    res.json({
+      mode: "PVP_FREE",
+      opponent: oppUser.username,
+      opponentRating: oppRating,
+      myRating,
+      tactic,
+      score: { myGoals, oppGoals },
+      outcome,
+      possession: { my: possession, opp: 100 - possession },
+      scorers,
+      earnedPoints,
+      stats: updatedUser,
+    });
+  } catch (err) {
+    console.error("PvP match error:", err);
+    res.status(500).json({ error: "Gagal menjalankan pertandingan PvP" });
+  }
+}
+
+export async function getManagerLeaderboard(_req: AuthRequest, res: Response) {
+  try {
+    const managers = await prisma.user.findMany({
+      orderBy: [{ freeMatchPoints: "desc" }, { freeMatchWins: "desc" }],
+      take: 20,
+      select: {
+        id: true,
+        username: true,
+        walletAddress: true,
+        freeMatchPlayed: true,
+        freeMatchWins: true,
+        freeMatchPoints: true,
+      },
+    });
+    res.json({ leaderboard: managers });
+  } catch (err) {
+    console.error("Get leaderboard error:", err);
+    res.status(500).json({ error: "Gagal memuat leaderboard" });
   }
 }

@@ -24,10 +24,31 @@ describe("W3 Football Manager Contracts (KANS + NFT + Marketplace)", function ()
       admin.address
     );
 
-    // Beri saldo KANS ke playerB untuk tes beli di marketplace
+    const CardPackShop = await ethers.getContractFactory("CardPackShop");
+    const packShop = await CardPackShop.deploy(
+      await cardNft.getAddress(),
+      await kansToken.getAddress(),
+      treasury.address,
+      backendSigner.address,
+      admin.address
+    );
+    const MINTER_ROLE = await cardNft.MINTER_ROLE();
+    await cardNft.grantRole(MINTER_ROLE, await packShop.getAddress());
+
+    // Beri saldo KANS ke playerB untuk tes beli di marketplace & buka pack
     await kansToken.mint(playerB.address, ethers.parseEther("5000"));
 
-    return { kansToken, cardNft, marketplace, admin, backendSigner, treasury, playerA, playerB };
+    return {
+      kansToken,
+      cardNft,
+      marketplace,
+      packShop,
+      admin,
+      backendSigner,
+      treasury,
+      playerA,
+      playerB,
+    };
   }
 
   // Helper membuat 11 kartu starter pack formasi 4-3-3 (1 GK, 4 DF, 3 MF, 3 FW)
@@ -252,6 +273,76 @@ describe("W3 Football Manager Contracts (KANS + NFT + Marketplace)", function ()
 
       const listing = await marketplace.listings(1);
       expect(listing.active).to.equal(false);
+    });
+  });
+
+  describe("4. CardPackShop (Buka Pack NFT Pakai KANS + Burn 50%)", function () {
+    it("berhasil buka Pack POTW, membakar 50% KANS, mengirim 50% ke treasury, dan mint NFT", async function () {
+      const { kansToken, cardNft, packShop, backendSigner, treasury, playerB } =
+        await loadFixture(deployFixture);
+
+      const card = {
+        playerId: 777,
+        position: 3,
+        baseOverall: 90,
+        rarity: 3, // LEGENDARY
+        edition: 1, // POTW
+        season: 2026,
+      };
+      const price = ethers.parseEther("300");
+      const nonce = 1001;
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+
+      const network = await ethers.provider.getNetwork();
+      const signature = await backendSigner.signTypedData(
+        {
+          name: "W3CardPackShop",
+          version: "1",
+          chainId: network.chainId,
+          verifyingContract: await packShop.getAddress(),
+        },
+        {
+          PackOpen: [
+            { name: "buyer", type: "address" },
+            { name: "card", type: "CardInput" },
+            { name: "price", type: "uint256" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+          CardInput: [
+            { name: "playerId", type: "uint32" },
+            { name: "position", type: "uint8" },
+            { name: "baseOverall", type: "uint8" },
+            { name: "rarity", type: "uint8" },
+            { name: "edition", type: "uint8" },
+            { name: "season", type: "uint16" },
+          ],
+        },
+        { buyer: playerB.address, card, price, nonce, deadline }
+      );
+
+      const supplyBefore = await kansToken.totalSupply();
+      await kansToken.connect(playerB).approve(await packShop.getAddress(), price);
+
+      await expect(packShop.connect(playerB).openPack(card, price, nonce, deadline, signature))
+        .to.emit(packShop, "PackOpened")
+        .withArgs(playerB.address, 1, price, ethers.parseEther("150"), ethers.parseEther("150"));
+
+      // Cek NFT tercetak ke playerB
+      expect(await cardNft.ownerOf(1)).to.equal(playerB.address);
+      const minted = await cardNft.getCard(1);
+      expect(minted.playerId).to.equal(777);
+      expect(minted.edition).to.equal(1); // POTW
+
+      // Cek 50% KANS (150) benar-benar dibakar (totalSupply berkurang) & 150 ke treasury
+      expect(await kansToken.totalSupply()).to.equal(supplyBefore - ethers.parseEther("150"));
+      expect(await kansToken.balanceOf(treasury.address)).to.equal(ethers.parseEther("150"));
+
+      // Replay nonce yang sama ditolak
+      await kansToken.connect(playerB).approve(await packShop.getAddress(), price);
+      await expect(
+        packShop.connect(playerB).openPack(card, price, nonce, deadline, signature)
+      ).to.be.revertedWith("Nonce pack sudah digunakan");
     });
   });
 });

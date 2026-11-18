@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePublicClient, useWriteContract } from "wagmi";
 import { decodeEventLog, parseEther } from "viem";
-import { RefreshCw, Save, Sparkles, Tag, Wallet, X } from "lucide-react";
+import { ArrowUpCircle, RefreshCw, Save, Sparkles, Tag, Wallet, X } from "lucide-react";
 import { useAuth } from "@/components/Providers";
 import { Pitch433 } from "@/components/Pitch433";
 import { PlayerCard } from "@/components/PlayerCard";
@@ -235,6 +235,26 @@ export default function SquadPage() {
       });
       setStatusMsg(res.message);
       setDirtyLineup(false);
+      await loadSquad();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpgradeCard = async () => {
+    if (!inspectCard) return;
+    setBusy(true);
+    setStatusMsg("");
+    try {
+      const res = await apiRequest<{ message: string; card: UserCardData }>(
+        `/squad/cards/${inspectCard.id}/upgrade`,
+        { method: "POST" }
+      );
+      setStatusMsg(res.message);
+      setInspectCard(res.card);
+      await refreshUser();
       await loadSquad();
     } catch (err: any) {
       alert(err.message);
@@ -498,6 +518,30 @@ export default function SquadPage() {
                   <div className="text-sm font-black text-white">{val}</div>
                 </div>
               ))}
+            </div>
+
+            {/* Training / Level Up Kartu */}
+            <div className="mt-4 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-sky-300">
+                    Training Kartu (Lv.{inspectCard.level} → Lv.{Math.min(10, inspectCard.level + 1)})
+                  </div>
+                  <div className="text-[10px] text-slate-300">
+                    Biaya: <strong>{inspectCard.level * 30} Poin Manager</strong> (Kamu punya{" "}
+                    <strong>{user.freeMatchPoints}</strong> pts)
+                    {inspectCard.isOnChain ? " • Level dicatat On-Chain!" : ""}
+                  </div>
+                </div>
+                <button
+                  onClick={handleUpgradeCard}
+                  disabled={busy || inspectCard.level >= 10 || inspectCard.isListed}
+                  className="flex shrink-0 items-center gap-1 rounded-lg bg-sky-500 px-3 py-2 text-xs font-black text-slate-950 hover:bg-sky-400 disabled:opacity-40"
+                >
+                  <ArrowUpCircle className="h-3.5 w-3.5" />
+                  <span>{inspectCard.level >= 10 ? "MAX" : "+1 OVR"}</span>
+                </button>
+              </div>
             </div>
 
             {/* Panel Jual ke Marketplace KANS */}
