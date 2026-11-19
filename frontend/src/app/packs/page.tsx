@@ -64,6 +64,13 @@ export default function PacksPage() {
     setOpeningId(pack.id);
     setStatusMsg("");
     try {
+      if (typeof window !== "undefined" && (window as any).ethereum) {
+        try {
+          await (window as any).ethereum.request({ method: "eth_requestAccounts" });
+        } catch {
+          throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
+        }
+      }
       if (!user.walletAddress) {
         await linkWallet();
       }

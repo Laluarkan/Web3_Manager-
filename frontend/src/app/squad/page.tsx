@@ -99,6 +99,13 @@ export default function SquadPage() {
     setBusy(true);
     setStatusMsg("");
     try {
+      if (typeof window !== "undefined" && (window as any).ethereum) {
+        try {
+          await (window as any).ethereum.request({ method: "eth_requestAccounts" });
+        } catch {
+          throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
+        }
+      }
       if (!user.walletAddress) {
         await linkWallet();
       }
@@ -307,6 +314,13 @@ export default function SquadPage() {
 
     setBusy(true);
     try {
+      if (typeof window !== "undefined" && (window as any).ethereum) {
+        try {
+          await (window as any).ethereum.request({ method: "eth_requestAccounts" });
+        } catch {
+          throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
+        }
+      }
       if (!user.walletAddress) {
         await linkWallet();
       }

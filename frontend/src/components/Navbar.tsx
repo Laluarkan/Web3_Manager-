@@ -141,11 +141,11 @@ export function Navbar() {
                 <div className="flex items-center gap-2">
                   {actualChainId === TARGET_CHAIN_ID ? (
                     <div
-                      title="Jaringan Hardhat Localhost (Chain ID 31337) Aktif"
+                      title={TARGET_CHAIN_ID === 11155111 ? "Jaringan Ethereum Sepolia (Chain ID 11155111) Aktif" : "Jaringan Hardhat Localhost (Chain ID 31337) Aktif"}
                       className="hidden items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-400 sm:flex"
                     >
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>Localhost 31337</span>
+                      <span>{TARGET_CHAIN_ID === 11155111 ? "Sepolia 11155111" : "Localhost 31337"}</span>
                     </div>
                   ) : (
                     <button
@@ -155,15 +155,15 @@ export function Navbar() {
                         } catch (err: any) {
                           alert(
                             "Gagal beralih jaringan otomatis: " +
-                              (err.message || "Silakan pilih Hardhat Localhost (31337) di MetaMask")
+                              (err.message || (TARGET_CHAIN_ID === 11155111 ? "Silakan pilih Sepolia Testnet di MetaMask" : "Silakan pilih Hardhat Localhost di MetaMask"))
                           );
                         }
                       }}
-                      title="MetaMask Anda saat ini berada di jaringan lain. Klik untuk beralih otomatis ke Hardhat Localhost!"
+                      title={TARGET_CHAIN_ID === 11155111 ? "MetaMask berada di jaringan lain. Klik untuk beralih ke Sepolia!" : "MetaMask berada di jaringan lain. Klik untuk beralih ke Hardhat Localhost!"}
                       className="flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-500/20 px-2.5 py-1 text-xs font-bold text-rose-300 animate-pulse hover:bg-rose-500/30"
                     >
                       <AlertTriangle className="h-3.5 w-3.5" />
-                      <span>⚠️ Pindah ke Localhost</span>
+                      <span>⚠️ Pindah ke {TARGET_CHAIN_ID === 11155111 ? "Sepolia" : "Localhost"}</span>
                     </button>
                   )}
                   <div className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-bold text-amber-300">
