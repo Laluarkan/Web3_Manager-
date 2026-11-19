@@ -9,7 +9,11 @@ import {
   signStarterPackVoucher,
   upgradeOnChainCardLevel,
 } from "../services/blockchain.service";
-import { buildMatchSimulation } from "../services/simulation.service";
+import {
+  buildMatchSimulation,
+  fetchDynamicOpponentSquad,
+  buildPvPOpponentSquad,
+} from "../services/simulation.service";
 
 const updateLineupSchema = z.object({
   slots: z
@@ -440,10 +444,12 @@ export async function playFreeMatch(req: AuthRequest, res: Response) {
       },
     });
 
+    const awayPlayers = await fetchDynamicOpponentSquad(prisma, difficulty);
     const simulation = buildMatchSimulation(
       updatedUser.username || "Tim Anda",
       opp.name,
       lineup.slots,
+      awayPlayers,
       myGoals,
       oppGoals,
       myRating,
@@ -694,10 +700,12 @@ export async function playPvpMatch(req: AuthRequest, res: Response) {
       select: { username: true, freeMatchPlayed: true, freeMatchWins: true, freeMatchPoints: true },
     });
 
+    const awayPlayers = buildPvPOpponentSquad(oppUser.lineup.slots);
     const simulation = buildMatchSimulation(
       updatedUser.username || "Tim Anda",
       oppUser.username,
       myLineup.slots,
+      awayPlayers,
       myGoals,
       oppGoals,
       myRating,

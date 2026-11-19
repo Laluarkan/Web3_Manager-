@@ -1,3 +1,5 @@
+import { PrismaClient } from "@prisma/client";
+
 export interface SimulationPlayer {
   id: number;
   name: string;
@@ -46,10 +48,105 @@ export interface GeneratedMatchSimulation {
   };
 }
 
-const DEFAULT_AWAY_NAMES = [
-  "R. Navas", "D. Carvajal", "S. Ramos", "V. van Dijk", "M. Marcelo",
-  "Casemiro", "L. Modric", "T. Kroos", "M. Salah", "K. Benzema", "Vinicius Jr."
-];
+/**
+ * Mengambil 11 pemain real dari database PostgreSQL sesuai level kesulitan (AMATEUR, PRO, WORLD_CLASS)
+ */
+export async function fetchDynamicOpponentSquad(
+  prisma: PrismaClient,
+  difficulty: "AMATEUR" | "PRO" | "WORLD_CLASS"
+): Promise<SimulationPlayer[]> {
+  const range =
+    difficulty === "AMATEUR"
+      ? { min: 60, max: 72 }
+      : difficulty === "PRO"
+      ? { min: 73, max: 81 }
+      : { min: 82, max: 99 };
+
+  try {
+    const [gks, dfs, mfs, fws] = await Promise.all([
+      prisma.player.findMany({
+        where: { position: "GK", overall: { gte: range.min, lte: range.max } },
+        take: 5,
+        orderBy: { overall: "desc" },
+      }),
+      prisma.player.findMany({
+        where: { position: "DF", overall: { gte: range.min, lte: range.max } },
+        take: 12,
+        orderBy: { overall: "desc" },
+      }),
+      prisma.player.findMany({
+        where: { position: "MF", overall: { gte: range.min, lte: range.max } },
+        take: 10,
+        orderBy: { overall: "desc" },
+      }),
+      prisma.player.findMany({
+        where: { position: "FW", overall: { gte: range.min, lte: range.max } },
+        take: 10,
+        orderBy: { overall: "desc" },
+      }),
+    ]);
+
+    // Acak pilihan agar tiap tanding pemainnya variatif
+    const shuffle = <T>(arr: T[]): T[] => arr.slice().sort(() => Math.random() - 0.5);
+    const selGK = shuffle(gks)[0];
+    const selDF = shuffle(dfs);
+    const selMF = shuffle(mfs);
+    const selFW = shuffle(fws);
+
+    const slotConfigs: Array<{ slot: string; p?: any; pos: "GK" | "DF" | "MF" | "FW" }> = [
+      { slot: "GK", p: selGK, pos: "GK" },
+      { slot: "LB", p: selDF[0], pos: "DF" },
+      { slot: "LCB", p: selDF[1] || selDF[0], pos: "DF" },
+      { slot: "RCB", p: selDF[2] || selDF[0], pos: "DF" },
+      { slot: "RB", p: selDF[3] || selDF[0], pos: "DF" },
+      { slot: "LCM", p: selMF[0], pos: "MF" },
+      { slot: "CM", p: selMF[1] || selMF[0], pos: "MF" },
+      { slot: "RCM", p: selMF[2] || selMF[0], pos: "MF" },
+      { slot: "LW", p: selFW[0], pos: "FW" },
+      { slot: "ST", p: selFW[1] || selFW[0], pos: "FW" },
+      { slot: "RW", p: selFW[2] || selFW[0], pos: "FW" },
+    ];
+
+    return slotConfigs.map((item, idx) => ({
+      id: item.p?.id || 8000 + idx,
+      name: item.p?.name || `Player ${idx + 1}`,
+      position: item.pos,
+      slotCode: item.slot,
+      number: idx === 0 ? 1 : idx + 1,
+      baseOverall: item.p?.overall || 72,
+    }));
+  } catch (err) {
+    console.warn("fetchDynamicOpponentSquad fallback:", err);
+    const fallbackSlots = ["GK", "LB", "LCB", "RCB", "RB", "LCM", "CM", "RCM", "LW", "ST", "RW"];
+    return fallbackSlots.map((slot, idx) => ({
+      id: 8000 + idx,
+      name: `Lawan ${slot}`,
+      position: slot === "GK" ? "GK" : slot.includes("B") ? "DF" : slot.includes("M") ? "MF" : "FW",
+      slotCode: slot,
+      number: idx === 0 ? 1 : idx + 1,
+      baseOverall: 70,
+    }));
+  }
+}
+
+export function buildPvPOpponentSquad(
+  oppSlots: Array<{
+    slotCode: string;
+    userCard: {
+      baseOverall: number;
+      player: { id: number; name: string; position: string };
+    };
+  }>
+): SimulationPlayer[] {
+  return oppSlots.map((s, idx) => ({
+    id: s.userCard.player.id,
+    name: s.userCard.player.name,
+    position: (s.userCard.player.position as any) || "MF",
+    slotCode: s.slotCode,
+    number: idx === 0 ? 1 : idx + 1,
+    baseOverall: s.userCard.baseOverall,
+  }));
+}
 
 export function buildMatchSimulation(
   homeTeamName: string,
@@ -61,13 +158,13 @@ export function buildMatchSimulation(
       player: { id: number; name: string; position: string };
     };
   }>,
+  awayPlayers: SimulationPlayer[],
   myGoals: number,
   oppGoals: number,
   myRating: number,
   oppRating: number,
   possessionHome: number
 ): GeneratedMatchSimulation {
-  // 1. Build home players (4-3-3 formation)
   const homePlayers: SimulationPlayer[] = homeSlots.map((s, idx) => ({
     id: s.userCard.player.id,
     name: s.userCard.player.name,
@@ -75,17 +172,6 @@ export function buildMatchSimulation(
     slotCode: s.slotCode,
     number: idx === 0 ? 1 : idx + 1,
     baseOverall: s.userCard.baseOverall,
-  }));
-
-  // 2. Build away players (standard 4-3-3 template)
-  const awaySlots = ["GK", "LB", "LCB", "RCB", "RB", "LCM", "CM", "RCM", "LW", "ST", "RW"];
-  const awayPlayers: SimulationPlayer[] = awaySlots.map((slot, idx) => ({
-    id: 9000 + idx,
-    name: DEFAULT_AWAY_NAMES[idx] || `Player ${idx + 1}`,
-    position: slot === "GK" ? "GK" : slot.includes("B") ? "DF" : slot.includes("M") ? "MF" : "FW",
-    slotCode: slot,
-    number: idx === 0 ? 1 : idx + 1,
-    baseOverall: oppRating,
   }));
 
   const events: MatchEvent[] = [];
@@ -121,7 +207,6 @@ export function buildMatchSimulation(
     goalEvents.push({ minute: pickRandomMinute(4, 88), team: "AWAY" });
   }
 
-  // Pre-generate ~22 realistic match moments spread across 90 minutes
   const keyMinutes: number[] = [
     5, 9, 14, 18, 22, 27, 33, 38, 42, 45, 48, 52, 57, 63, 68, 73, 78, 82, 86, 90
   ];
@@ -138,7 +223,6 @@ export function buildMatchSimulation(
     return defs.length ? defs : list;
   };
 
-  // Compile all key events
   let homeShots = myGoals;
   let awayShots = oppGoals;
   let homeOnTarget = myGoals;
@@ -176,7 +260,6 @@ export function buildMatchSimulation(
       continue;
     }
 
-    // Cek apakah di menit ini ada gol
     const matchingGoal = goalEvents.find((g) => Math.abs(g.minute - m) <= 2);
     if (matchingGoal && !events.some((e) => e.type === "GOAL" && e.minute === matchingGoal.minute)) {
       const isHome = matchingGoal.team === "HOME";
@@ -202,7 +285,6 @@ export function buildMatchSimulation(
       continue;
     }
 
-    // Acak event normal (Pass, Chance, Shot, Save, Foul, Corner)
     const isHomeAction = Math.random() * 100 < possessionHome;
     const activeTeam = isHomeAction ? "HOME" : "AWAY";
     const attackTeam = getAttackers(activeTeam);
@@ -213,7 +295,6 @@ export function buildMatchSimulation(
 
     const roll = Math.random();
     if (roll < 0.28) {
-      // Chance / Shot saved
       if (isHomeAction) {
         homeShots++;
         homeOnTarget++;
@@ -228,11 +309,10 @@ export function buildMatchSimulation(
         team: activeTeam,
         player: p1.name,
         targetPlayer: defender.name,
-        description: `Peluang emas! ${p1.name} melepaskan tembakan voli keras, namun kiper lawan berhasil menepis bola!`,
+        description: `Peluang emas! ${p1.name} melepaskan tembakan voli keras, namun kiper berhasil menepis bola!`,
         ballCoord: isHomeAction ? { x: 88, y: 46 } : { x: 12, y: 54 },
       });
     } else if (roll < 0.48) {
-      // Corner kick
       if (isHomeAction) homeCorners++;
       else awayCorners++;
       events.push({
@@ -245,7 +325,6 @@ export function buildMatchSimulation(
         ballCoord: isHomeAction ? { x: 98, y: 5 } : { x: 2, y: 95 },
       });
     } else if (roll < 0.68) {
-      // Foul & Yellow Card
       if (isHomeAction) {
         awayFouls++;
         if (Math.random() < 0.4) awayYellows++;
@@ -264,7 +343,6 @@ export function buildMatchSimulation(
         ballCoord: isHomeAction ? { x: 65, y: 40 } : { x: 35, y: 60 },
       });
     } else {
-      // Build-up play / Through Pass
       events.push({
         id: `ev-${m}`,
         minute: m,
@@ -272,13 +350,12 @@ export function buildMatchSimulation(
         team: activeTeam,
         player: p1.name,
         targetPlayer: p2.name,
-        description: `${p1.name} mengatur tempo serangan, mengoper bola terobosan manis kepada ${p2.name}.`,
-        ballCoord: isHomeAction ? { x: 60, y: 50 } : { x: 40, y: 50 },
+        description: `${p1.name} mengatur tempo serangan, mengoper bola terobosan kepada ${p2.name}.`,
+        ballCoord: isHomeAction ? { x: 62, y: 50 } : { x: 38, y: 50 },
       });
     }
   }
 
-  // Ensure all goals are present in events list
   for (const g of goalEvents) {
     if (!events.some((e) => e.type === "GOAL" && e.minute === g.minute)) {
       const isHome = g.team === "HOME";
@@ -298,7 +375,6 @@ export function buildMatchSimulation(
     }
   }
 
-  // Sort events chronologically by minute
   events.sort((a, b) => a.minute - b.minute);
 
   return {
