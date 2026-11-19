@@ -32,10 +32,24 @@ function getProvider() {
 }
 
 function getBackendSigner() {
-  if (!env.backendSignerPrivateKey) {
-    throw new Error("BACKEND_SIGNER_PRIVATE_KEY belum dikonfigurasi");
+  let rawKey = (env.backendSignerPrivateKey || "").trim().replace(/^["']|["']$/g, "").trim();
+  if (!rawKey) {
+    throw new Error("BACKEND_SIGNER_PRIVATE_KEY belum dikonfigurasi di environment.");
   }
-  return new ethers.Wallet(env.backendSignerPrivateKey, getProvider());
+  if (rawKey.length === 42 && rawKey.startsWith("0x")) {
+    throw new Error(
+      "BACKEND_SIGNER_PRIVATE_KEY yang dimasukkan di Render adalah ALAMAT DOMPET (0x... 42 karakter), BUKAN Private Key! Buka MetaMask -> klik 3 titik / nama akun -> Detail Akun -> Tampilkan Kunci Pribadi (Private Key 64 karakter hex), lalu salin kode tersebut ke BACKEND_SIGNER_PRIVATE_KEY di Render."
+    );
+  }
+  if (!rawKey.startsWith("0x")) {
+    rawKey = `0x${rawKey}`;
+  }
+  if (rawKey.length !== 66) {
+    throw new Error(
+      `BACKEND_SIGNER_PRIVATE_KEY memiliki panjang ${rawKey.length} karakter (seharusnya 64 hex karakter atau 66 dengan 0x). Pastikan yang disalin adalah Private Key dari MetaMask, bukan alamat dompet!`
+    );
+  }
+  return new ethers.Wallet(rawKey, getProvider());
 }
 
 export function getKansContract(withSigner = false) {
@@ -139,26 +153,34 @@ export async function signStarterPackVoucher(
  * Membaca seluruh kartu NFT milik suatu alamat wallet langsung dari blockchain.
  */
 export async function fetchOnChainCardsOfOwner(walletAddress: string) {
-  const nft = getCardNftContract(false);
-  const tokenIds: bigint[] = await nft.getTokensOfOwner(walletAddress);
+  try {
+    const nft = getCardNftContract(false);
+    const tokenIds: bigint[] = await nft.getTokensOfOwner(walletAddress);
 
-  const cards = await Promise.all(
-    tokenIds.map(async (tid) => {
-      const meta = await nft.getCard(tid);
-      return {
-        tokenId: Number(tid),
-        playerId: Number(meta.playerId),
-        position: INDEX_TO_POSITION[Number(meta.position)] || "MF",
-        baseOverall: Number(meta.baseOverall),
-        level: Number(meta.level),
-        rarity: INDEX_TO_RARITY[Number(meta.rarity)] || "COMMON",
-        edition: INDEX_TO_EDITION[Number(meta.edition)] || "BASE",
-        season: Number(meta.season),
-      };
-    })
-  );
+    const cards = await Promise.all(
+      tokenIds.map(async (tid) => {
+        const meta = await nft.getCard(tid);
+        return {
+          tokenId: Number(tid),
+          playerId: Number(meta.playerId),
+          position: INDEX_TO_POSITION[Number(meta.position)] || "MF",
+          baseOverall: Number(meta.baseOverall),
+          level: Number(meta.level),
+          rarity: INDEX_TO_RARITY[Number(meta.rarity)] || "COMMON",
+          edition: INDEX_TO_EDITION[Number(meta.edition)] || "BASE",
+          season: Number(meta.season),
+        };
+      })
+    );
 
-  return cards;
+    return cards;
+  } catch (err: any) {
+    if (err?.code === "BAD_DATA" || err?.message?.includes("could not decode result data")) {
+      console.warn("fetchOnChainCardsOfOwner decode warning:", err?.message);
+      return [];
+    }
+    throw err;
+  }
 }
 
 export async function fetchOnChainCard(tokenId: number) {
