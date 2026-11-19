@@ -1,18 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { usePublicClient, useWriteContract } from "wagmi";
+import { usePublicClient, useWriteContract, useChainId, useSwitchChain } from "wagmi";
 import { parseEther } from "viem";
 import { Coins, Search, ShoppingBag, Trash2, Wallet } from "lucide-react";
 import { useAuth } from "@/components/Providers";
 import { PlayerCard } from "@/components/PlayerCard";
 import { apiRequest, MarketListingData } from "@/lib/api";
 import { CONTRACT_ADDRESSES, KANS_TOKEN_ABI, MARKETPLACE_ABI } from "@/lib/contracts";
+import { TARGET_CHAIN_ID, switchToTargetNetwork } from "@/lib/wagmi";
 
 export default function MarketPage() {
   const { user, linkWallet } = useAuth();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+  const chainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
 
   const [listings, setListings] = useState<MarketListingData[]>([]);
   const [tab, setTab] = useState<"ALL" | "MINE">("ALL");
@@ -63,6 +66,15 @@ export default function MarketPage() {
       }
       if (!publicClient) throw new Error("Provider Web3 belum siap");
 
+      if (chainId !== TARGET_CHAIN_ID) {
+        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (31337)...");
+        try {
+          await switchToTargetNetwork();
+        } catch {
+          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+        }
+      }
+
       const priceWei = parseEther(item.priceKans);
 
       // 1. Approve KANS ke CardMarketplace.sol
@@ -72,6 +84,7 @@ export default function MarketPage() {
         abi: KANS_TOKEN_ABI,
         functionName: "approve",
         args: [CONTRACT_ADDRESSES.marketplace, priceWei],
+        gas: BigInt(150000),
       });
       await publicClient.waitForTransactionReceipt({ hash: approveTx });
 
@@ -82,6 +95,7 @@ export default function MarketPage() {
         abi: MARKETPLACE_ABI,
         functionName: "buyCard",
         args: [BigInt(item.listingId)],
+        gas: BigInt(300000),
       });
       await publicClient.waitForTransactionReceipt({ hash: buyTx });
 

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { usePublicClient, useWriteContract } from "wagmi";
+import { usePublicClient, useWriteContract, useChainId, useSwitchChain } from "wagmi";
 import { decodeEventLog, parseEther } from "viem";
 import { ArrowUpCircle, RefreshCw, Save, Sparkles, Tag, Wallet, X } from "lucide-react";
 import { useAuth } from "@/components/Providers";
@@ -10,6 +10,7 @@ import { Pitch433 } from "@/components/Pitch433";
 import { PlayerCard } from "@/components/PlayerCard";
 import { apiRequest, LineupSlotData, SquadResponse, UserCardData } from "@/lib/api";
 import { CARD_NFT_ABI, CONTRACT_ADDRESSES, MARKETPLACE_ABI } from "@/lib/contracts";
+import { TARGET_CHAIN_ID, switchToTargetNetwork } from "@/lib/wagmi";
 
 const SLOT_REQUIRED_POS: Record<string, string> = {
   GK: "GK",
@@ -29,6 +30,8 @@ export default function SquadPage() {
   const { user, loading: authLoading, refreshUser, linkWallet } = useAuth();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+  const chainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
 
   const [squad, setSquad] = useState<SquadResponse | null>(null);
   const [draftSlots, setDraftSlots] = useState<LineupSlotData[]>([]);
@@ -99,6 +102,14 @@ export default function SquadPage() {
       if (!user.walletAddress) {
         await linkWallet();
       }
+      if (chainId !== TARGET_CHAIN_ID) {
+        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (31337)...");
+        try {
+          await switchToTargetNetwork();
+        } catch {
+          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+        }
+      }
       const { voucher } = await apiRequest<{
         voucher: {
           cards: Array<{
@@ -126,6 +137,7 @@ export default function SquadPage() {
           BigInt(voucher.deadline),
           voucher.signature,
         ],
+        gas: BigInt(2500000),
       });
 
       setStatusMsg("Transaksi dikirim! Menunggu konfirmasi blockchain...");
@@ -263,6 +275,24 @@ export default function SquadPage() {
     }
   };
 
+  const handleToggleLock = async () => {
+    if (!inspectCard) return;
+    setBusy(true);
+    try {
+      const res = await apiRequest<{ message: string; isLocked: boolean }>(
+        `/social/cards/${inspectCard.id}/lock`,
+        { method: "POST" }
+      );
+      alert(res.message);
+      setInspectCard({ ...inspectCard, isLocked: res.isLocked });
+      await loadSquad();
+    } catch (err: any) {
+      alert(err.message || "Gagal mengubah status kunci kartu");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleListForSale = async () => {
     if (!inspectCard || !inspectCard.isOnChain || !inspectCard.tokenId) return;
     const numericPrice = Number(sellPrice);
@@ -277,6 +307,15 @@ export default function SquadPage() {
         await linkWallet();
       }
       if (!publicClient) throw new Error("Provider Web3 belum siap");
+
+      if (chainId !== TARGET_CHAIN_ID) {
+        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (31337)...");
+        try {
+          await switchToTargetNetwork();
+        } catch {
+          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+        }
+      }
 
       // 1. Cek apakah marketplace sudah di-approve oleh wallet penjual
       const isApproved = await publicClient.readContract({
@@ -293,6 +332,7 @@ export default function SquadPage() {
           abi: CARD_NFT_ABI,
           functionName: "setApprovalForAll",
           args: [CONTRACT_ADDRESSES.marketplace, true],
+          gas: BigInt(100000),
         });
         await publicClient.waitForTransactionReceipt({ hash: approveTx });
       }
@@ -304,6 +344,7 @@ export default function SquadPage() {
         abi: MARKETPLACE_ABI,
         functionName: "listCard",
         args: [BigInt(inspectCard.tokenId), parseEther(sellPrice)],
+        gas: BigInt(200000),
       });
       const receipt = await publicClient.waitForTransactionReceipt({ hash: listTx });
 
@@ -542,6 +583,31 @@ export default function SquadPage() {
                   <span>{inspectCard.level >= 10 ? "MAX" : "+1 OVR"}</span>
                 </button>
               </div>
+            </div>
+
+            {/* Fitur Kunci Pemain (Tolak Tawaran / Untouchable) */}
+            <div className="mt-3 flex items-center justify-between rounded-xl border border-slate-700 bg-slate-950/60 p-3">
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span>{inspectCard.isLocked ? "🔒 Status: Dikunci (Untouchable)" : "🔓 Status: Terbuka untuk Ditawar"}</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  {inspectCard.isLocked
+                    ? "Pemain ini menolak semua tawaran transfer dari teman/manajer lain."
+                    : "Teman atau manajer lain dapat mengajukan tawaran KANS untuk pemain ini."}
+                </div>
+              </div>
+              <button
+                onClick={handleToggleLock}
+                disabled={busy}
+                className={`rounded-lg px-3 py-1.5 text-xs font-bold transition disabled:opacity-40 ${
+                  inspectCard.isLocked
+                    ? "border border-rose-500/40 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30"
+                    : "border border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
+                }`}
+              >
+                {inspectCard.isLocked ? "Buka Kunci" : "Kunci Pemain"}
+              </button>
             </div>
 
             {/* Panel Jual ke Marketplace KANS */}

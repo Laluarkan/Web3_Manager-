@@ -68,9 +68,12 @@ export function PlayerCard({ card, compact = false, selected = false, onClick }:
             <div className="text-sm font-black text-white">{effectiveOvr}</div>
             <div className="text-[9px] font-bold text-slate-300">{card.position}</div>
           </div>
-          <span className={`rounded px-1 py-0.5 text-[8px] font-extrabold ${style.badge}`}>
-            {card.rarity.slice(0, 4)}
-          </span>
+          <div className="flex items-center gap-0.5">
+            {card.isLocked && <span title="Kartu Dikunci (Tolak Tawaran)" className="text-[9px]">🔒</span>}
+            <span className={`rounded px-1 py-0.5 text-[8px] font-extrabold ${style.badge}`}>
+              {card.rarity.slice(0, 4)}
+            </span>
+          </div>
         </div>
 
         <div className="my-1 flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-white/15 bg-slate-950/70 text-xs font-black text-emerald-300">
@@ -118,9 +121,16 @@ export function PlayerCard({ card, compact = false, selected = false, onClick }:
           </div>
         </div>
         <div className="flex flex-col items-end gap-1">
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${style.badge}`}>
-            {card.rarity}
-          </span>
+          <div className="flex items-center gap-1">
+            {card.isLocked && (
+              <span className="rounded border border-rose-500/40 bg-rose-500/20 px-1.5 py-0.5 text-[9px] font-bold text-rose-300">
+                🔒 Dikunci
+              </span>
+            )}
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${style.badge}`}>
+              {card.rarity}
+            </span>
+          </div>
           <div className="flex items-center gap-1">
             <span className="rounded bg-slate-900/80 px-1.5 py-0.5 text-[9px] font-semibold text-slate-300">
               {card.edition}

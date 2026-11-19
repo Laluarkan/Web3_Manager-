@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { usePublicClient, useWriteContract } from "wagmi";
+import { usePublicClient, useWriteContract, useAccount, useChainId, useSwitchChain } from "wagmi";
 import { decodeEventLog } from "viem";
 import { Coins, Flame, Package, Sparkles, Wallet, X } from "lucide-react";
 import { useAuth } from "@/components/Providers";
 import { PlayerCard } from "@/components/PlayerCard";
 import { apiRequest, PlayerData, UserCardData } from "@/lib/api";
 import { CONTRACT_ADDRESSES, KANS_TOKEN_ABI, PACK_SHOP_ABI } from "@/lib/contracts";
+import { TARGET_CHAIN_ID, switchToTargetNetwork } from "@/lib/wagmi";
 
 interface PackItem {
   id: "STANDARD" | "POTW" | "ICONIC";
@@ -28,6 +29,9 @@ export default function PacksPage() {
   const { user, linkWallet } = useAuth();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
 
   const [packs, setPacks] = useState<PackItem[]>([]);
   const [potwFeatured, setPotwFeatured] = useState<PlayerData[]>([]);
@@ -65,6 +69,21 @@ export default function PacksPage() {
       }
       if (!publicClient) throw new Error("Provider Web3 belum siap");
 
+      const actualChain =
+        typeof window !== "undefined" && (window as any).ethereum?.chainId
+          ? parseInt((window as any).ethereum.chainId, 16)
+          : chainId;
+
+      if (actualChain !== TARGET_CHAIN_ID) {
+        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (Chain ID 31337)...");
+        try {
+          await switchToTargetNetwork();
+        } catch {
+          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+        }
+      }
+
+      const activeBuyer = address || user.walletAddress;
       setStatusMsg(`Menyiapkan voucher ${pack.name}...`);
       const { voucher } = await apiRequest<{
         voucher: {
@@ -84,7 +103,7 @@ export default function PacksPage() {
         };
       }>("/packs/voucher", {
         method: "POST",
-        body: JSON.stringify({ packId: pack.id }),
+        body: JSON.stringify({ packId: pack.id, buyerAddress: activeBuyer }),
       });
 
       const priceWei = BigInt(voucher.priceWei);
@@ -95,6 +114,7 @@ export default function PacksPage() {
         abi: KANS_TOKEN_ABI,
         functionName: "approve",
         args: [CONTRACT_ADDRESSES.packShop, priceWei],
+        gas: BigInt(150000),
       });
       await publicClient.waitForTransactionReceipt({ hash: approveTx });
 
@@ -110,6 +130,7 @@ export default function PacksPage() {
           BigInt(voucher.deadline),
           voucher.signature,
         ],
+        gas: BigInt(500000),
       });
       const receipt = await publicClient.waitForTransactionReceipt({ hash: openTx });
 

@@ -345,4 +345,119 @@ describe("W3 Football Manager Contracts (KANS + NFT + Marketplace)", function ()
       ).to.be.revertedWith("Nonce pack sudah digunakan");
     });
   });
+
+  describe("5. CardMarketplace Private Deal (Tawar-Menawar EIP-712 Tanpa Escrow)", function () {
+    it("berhasil eksekusi kesepakatan privat jika penjual sudah tanda tangan, meskipun penjual sedang offline", async function () {
+      const { kansToken, cardNft, marketplace, packShop, backendSigner, treasury, playerA, playerB } =
+        await loadFixture(deployFixture);
+
+      const price = ethers.parseEther("400");
+      const nonce = 888999;
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+
+      // Beri NFT #1 ke playerB melalui pembukaan pack POTW
+      const card = {
+        playerId: 999,
+        position: 3, // FW
+        baseOverall: 92,
+        rarity: 2, // EPIC
+        edition: 1, // POTW
+        season: 2026,
+      };
+      const packPrice = ethers.parseEther("300");
+      const packNonce = 112233;
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const packSig = await backendSigner.signTypedData(
+        {
+          name: "W3CardPackShop",
+          version: "1",
+          chainId,
+          verifyingContract: await packShop.getAddress(),
+        },
+        {
+          PackOpen: [
+            { name: "buyer", type: "address" },
+            { name: "card", type: "CardInput" },
+            { name: "price", type: "uint256" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+          CardInput: [
+            { name: "playerId", type: "uint32" },
+            { name: "position", type: "uint8" },
+            { name: "baseOverall", type: "uint8" },
+            { name: "rarity", type: "uint8" },
+            { name: "edition", type: "uint8" },
+            { name: "season", type: "uint16" },
+          ],
+        },
+        { buyer: playerB.address, card, price: packPrice, nonce: packNonce, deadline }
+      );
+      await kansToken.connect(playerB).approve(await packShop.getAddress(), packPrice);
+      await packShop.connect(playerB).openPack(card, packPrice, packNonce, deadline, packSig);
+
+      expect(await cardNft.ownerOf(1)).to.equal(playerB.address);
+
+      // playerB (penjual) menyetujui CardMarketplace
+      await cardNft.connect(playerB).setApprovalForAll(await marketplace.getAddress(), true);
+
+      // Beri saldo KANS ke playerA (pembeli) dan approve marketplace untuk 400 KANS
+      await kansToken.mint(playerA.address, ethers.parseEther("1000"));
+      await kansToken.connect(playerA).approve(await marketplace.getAddress(), price);
+
+      // playerB (penjual) tanda tangan kesepakatan EIP-712
+      const sellerSignature = await playerB.signTypedData(
+        {
+          name: "W3CardMarketplace",
+          version: "1",
+          chainId,
+          verifyingContract: await marketplace.getAddress(),
+        },
+        {
+          PrivateDeal: [
+            { name: "seller", type: "address" },
+            { name: "buyer", type: "address" },
+            { name: "tokenId", type: "uint256" },
+            { name: "price", type: "uint256" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+        },
+        {
+          seller: playerB.address,
+          buyer: playerA.address,
+          tokenId: 1,
+          price,
+          nonce,
+          deadline,
+        }
+      );
+
+      // playerA (pembeli) mengeksekusi deal on-chain (playerB tidak perlu aktif/transaksi lagi)
+      const sellerBalanceBefore = await kansToken.balanceOf(playerB.address);
+      await expect(
+        marketplace
+          .connect(playerA)
+          .executePrivateDeal(1, price, playerB.address, nonce, deadline, sellerSignature)
+      )
+        .to.emit(marketplace, "PrivateDealExecuted")
+        .withArgs(
+          playerB.address,
+          playerA.address,
+          1,
+          price,
+          ethers.parseEther("10"), // 2.5% fee dari 400 = 10 KANS
+          nonce
+        );
+
+      // NFT #1 sekarang resmi berpindah ke playerA
+      expect(await cardNft.ownerOf(1)).to.equal(playerA.address);
+
+      // Saldo playerB bertambah 390 KANS (400 - 10 fee)
+      expect(await kansToken.balanceOf(playerB.address)).to.equal(
+        sellerBalanceBefore + ethers.parseEther("390")
+      );
+    });
+  });
 });

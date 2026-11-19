@@ -56,6 +56,7 @@ const PACK_CATALOG: PackDefinition[] = [
 
 const packVoucherSchema = z.object({
   packId: z.enum(["STANDARD", "POTW", "ICONIC"]),
+  buyerAddress: z.string().optional(),
 });
 
 const packConfirmSchema = z.object({
@@ -138,8 +139,24 @@ export async function requestPackVoucher(req: AuthRequest, res: Response) {
     const picked = candidates[Math.floor(Math.random() * candidates.length)];
     const baseOverall = Math.min(maxOvr, Math.max(minOvr, picked.overall));
 
+    let buyer = req.user!.walletAddress;
+    if (parsed.data.buyerAddress && parsed.data.buyerAddress.startsWith("0x")) {
+      buyer = parsed.data.buyerAddress;
+      if (buyer.toLowerCase() !== (req.user!.walletAddress || "").toLowerCase()) {
+        await prisma.user.update({
+          where: { id: req.user!.id },
+          data: { walletAddress: buyer },
+        });
+      }
+    }
+
+    if (!buyer) {
+      res.status(400).json({ error: "Alamat dompet (walletAddress) belum terhubung" });
+      return;
+    }
+
     const voucher = await signPackOpenVoucher(
-      req.user!.walletAddress!,
+      buyer,
       {
         playerId: picked.id,
         position: picked.position,
@@ -174,9 +191,12 @@ export async function confirmPackOpen(req: AuthRequest, res: Response) {
 
     // Verifikasi langsung ke blockchain
     const onChain = await fetchOnChainCard(parsed.data.tokenId);
-    if (onChain.owner !== walletAddress) {
-      res.status(403).json({ error: "NFT ini bukan milik dompet Anda di blockchain" });
-      return;
+    if (onChain.owner.toLowerCase() !== (walletAddress || "").toLowerCase()) {
+      // Sinkronkan alamat dompet jika kartu dicetak memakai akun MetaMask aktif
+      await prisma.user.update({
+        where: { id: userId },
+        data: { walletAddress: onChain.owner },
+      });
     }
 
     const saved = await prisma.userCard.upsert({

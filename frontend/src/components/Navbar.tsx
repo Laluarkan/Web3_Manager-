@@ -2,19 +2,54 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
-import { useReadContract } from "wagmi";
+import { useEffect, useState } from "react";
+import { useReadContract, useAccount, useChainId, useSwitchChain } from "wagmi";
 import { formatEther } from "viem";
-import { Coins, LogOut, Package, Shield, ShoppingBag, Swords, LayoutDashboard, Wallet } from "lucide-react";
+import { Coins, LogOut, Package, Shield, ShoppingBag, Swords, LayoutDashboard, Wallet, AlertTriangle, Users, Bell } from "lucide-react";
 import { useAuth } from "./Providers";
 import { CONTRACT_ADDRESSES, KANS_TOKEN_ABI } from "@/lib/contracts";
 import { apiRequest } from "@/lib/api";
+import { TARGET_CHAIN_ID, switchToTargetNetwork } from "@/lib/wagmi";
 
 export function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout, linkWallet } = useAuth();
   const [busy, setBusy] = useState(false);
+  const { chain } = useAccount();
+  const [actualChainId, setActualChainId] = useState<number>(TARGET_CHAIN_ID);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    if (!user) return;
+    const fetchNotifs = async () => {
+      try {
+        const data = await apiRequest<{ unreadCount: number }>("/social/notifications");
+        setUnreadCount(data.unreadCount || 0);
+      } catch {
+        // silent
+      }
+    };
+    fetchNotifs();
+    const interval = setInterval(fetchNotifs, 15000);
+    return () => clearInterval(interval);
+  }, [user]);
+
+  useEffect(() => {
+    const checkChain = () => {
+      if (typeof window !== "undefined" && (window as any).ethereum?.chainId) {
+        setActualChainId(parseInt((window as any).ethereum.chainId, 16));
+      } else if (chain?.id) {
+        setActualChainId(chain.id);
+      }
+    };
+    checkChain();
+    if (typeof window !== "undefined" && (window as any).ethereum?.on) {
+      (window as any).ethereum.on("chainChanged", (hex: string) => {
+        setActualChainId(parseInt(hex, 16));
+      });
+    }
+  }, [chain]);
 
   const { data: kansRaw, refetch: refetchKans } = useReadContract({
     address: CONTRACT_ADDRESSES.kansToken,
@@ -58,6 +93,7 @@ export function Navbar() {
     { href: "/match", label: "Arena Match", icon: Swords },
     { href: "/packs", label: "Pack Shop", icon: Package },
     { href: "/market", label: "Marketplace", icon: ShoppingBag },
+    { href: "/social", label: "Komunitas & Nego", icon: Users },
   ];
 
   return (
@@ -103,6 +139,33 @@ export function Navbar() {
             <>
               {user.walletAddress ? (
                 <div className="flex items-center gap-2">
+                  {actualChainId === TARGET_CHAIN_ID ? (
+                    <div
+                      title="Jaringan Hardhat Localhost (Chain ID 31337) Aktif"
+                      className="hidden items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-400 sm:flex"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>Localhost 31337</span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        try {
+                          await switchToTargetNetwork();
+                        } catch (err: any) {
+                          alert(
+                            "Gagal beralih jaringan otomatis: " +
+                              (err.message || "Silakan pilih Hardhat Localhost (31337) di MetaMask")
+                          );
+                        }
+                      }}
+                      title="MetaMask Anda saat ini berada di jaringan lain. Klik untuk beralih otomatis ke Hardhat Localhost!"
+                      className="flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-500/20 px-2.5 py-1 text-xs font-bold text-rose-300 animate-pulse hover:bg-rose-500/30"
+                    >
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      <span>⚠️ Pindah ke Localhost</span>
+                    </button>
+                  )}
                   <div className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-bold text-amber-300">
                     <Coins className="h-3.5 w-3.5" />
                     <span>{kansFormatted} KANS</span>
@@ -110,10 +173,35 @@ export function Navbar() {
                   <button
                     onClick={handleFaucet}
                     disabled={busy}
-                    title="Klaim 1.000 Test KANS gratis (Khusus Hardhat/Testnet)"
+                    title="Klaim 1.000 Test KANS + 10 ETH Gas gratis (Khusus Hardhat/Testnet)"
                     className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
                   >
                     +1K Test
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        if (typeof window !== "undefined" && (window as any).ethereum) {
+                          await (window as any).ethereum.request({
+                            method: "wallet_watchAsset",
+                            params: {
+                              type: "ERC20",
+                              options: {
+                                address: CONTRACT_ADDRESSES.kansToken,
+                                symbol: "KANS",
+                                decimals: 18,
+                              },
+                            },
+                          });
+                        }
+                      } catch (e: any) {
+                        alert("Gagal menambahkan KANS ke MetaMask: " + e.message);
+                      }
+                    }}
+                    title="Tambahkan koin KANS ke daftar token MetaMask Anda"
+                    className="hidden rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 sm:block"
+                  >
+                    + Impor KANS
                   </button>
                   <div className="hidden rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-[11px] text-slate-300 sm:block">
                     {user.walletAddress.slice(0, 6)}...{user.walletAddress.slice(-4)}
@@ -129,6 +217,19 @@ export function Navbar() {
                   <span>{busy ? "Menghubungkan..." : "Hubungkan Wallet"}</span>
                 </button>
               )}
+
+              <Link
+                href="/social?tab=offers"
+                title="Notifikasi & Negosiasi Transfer"
+                className="relative rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:bg-slate-800 hover:text-white"
+              >
+                <Bell className="h-4 w-4" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-[9px] font-black text-white animate-pulse">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </Link>
 
               <div className="hidden text-xs font-medium text-slate-300 md:block">
                 {user.username}

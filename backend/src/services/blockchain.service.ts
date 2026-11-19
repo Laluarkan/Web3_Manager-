@@ -193,6 +193,21 @@ export async function mintTestKansFaucet(walletAddress: string, amountKans = "10
   if (!env.enableTestFaucet) {
     throw new Error("Faucet KANS uji coba dinonaktifkan");
   }
+  const signer = getBackendSigner();
+  const provider = getProvider();
+  try {
+    const ethBalance = await provider.getBalance(walletAddress);
+    if (ethBalance < ethers.parseEther("1")) {
+      const fundTx = await signer.sendTransaction({
+        to: walletAddress,
+        value: ethers.parseEther("10"),
+      });
+      await fundTx.wait();
+    }
+  } catch (e) {
+    console.warn("Could not fund test ETH:", e);
+  }
+
   const kans = getKansContract(true);
   const tx = await kans.mint(walletAddress, ethers.parseEther(amountKans));
   const receipt = await tx.wait();

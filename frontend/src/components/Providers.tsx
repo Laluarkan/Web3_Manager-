@@ -73,18 +73,46 @@ function AuthStateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const linkWallet = async (): Promise<string> => {
+    if (typeof window !== "undefined" && !(window as any).ethereum) {
+      throw new Error(
+        "Ekstensi Web3 (MetaMask) belum terpasang di browser Anda!\n\nSilakan instal MetaMask dari https://metamask.io, buat/impor dompet, lalu refresh halaman ini."
+      );
+    }
+
     let walletAddr = address;
     if (!isConnected || !walletAddr) {
       const injectedConnector = connectors[0];
       if (!injectedConnector) {
-        throw new Error("MetaMask belum terpasang di browser Anda!");
+        throw new Error(
+          "Ekstensi Web3 (MetaMask) tidak terdeteksi. Silakan pasang MetaMask dari https://metamask.io"
+        );
       }
-      const connected = await connectAsync({ connector: injectedConnector });
-      walletAddr = connected.accounts[0];
+      try {
+        const connected = await connectAsync({ connector: injectedConnector });
+        walletAddr = connected.accounts[0];
+      } catch (err: any) {
+        if (err.message?.includes("Provider not found") || err.name === "ProviderNotFoundError") {
+          throw new Error(
+            "Ekstensi Web3 (MetaMask) tidak ditemukan di browser Anda. Pastikan ekstensi MetaMask aktif lalu refresh browser."
+          );
+        }
+        if (err.message?.includes("User rejected") || err.name === "UserRejectedRequestError") {
+          throw new Error("Permintaan koneksi dibatalkan di MetaMask.");
+        }
+        throw err;
+      }
     }
 
     const { message } = await apiRequest<{ nonce: string; message: string }>("/auth/wallet-nonce");
-    const signature = await signMessageAsync({ message });
+    let signature: string;
+    try {
+      signature = await signMessageAsync({ message });
+    } catch (err: any) {
+      if (err.message?.includes("User rejected") || err.name === "UserRejectedRequestError") {
+        throw new Error("Tanda tangan otentikasi dibatalkan di MetaMask.");
+      }
+      throw err;
+    }
 
     const res = await apiRequest<{ message: string; user: UserProfile }>("/auth/link-wallet", {
       method: "POST",

@@ -6,12 +6,14 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title CardMarketplace
  * @notice Marketplace P2P on-chain untuk jual-beli FootballCardNFT menggunakan token KANS.
  */
-contract CardMarketplace is ReentrancyGuard, Ownable {
+contract CardMarketplace is ReentrancyGuard, Ownable, EIP712 {
     using SafeERC20 for IERC20;
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -34,6 +36,11 @@ contract CardMarketplace is ReentrancyGuard, Ownable {
 
     mapping(uint256 => Listing) public listings;
     mapping(uint256 => uint256) public activeListingByToken;
+    mapping(uint256 => bool) public usedDealNonces;
+
+    bytes32 private constant PRIVATE_DEAL_TYPEHASH = keccak256(
+        "PrivateDeal(address seller,address buyer,uint256 tokenId,uint256 price,uint256 nonce,uint256 deadline)"
+    );
 
     event CardListed(
         uint256 indexed listingId,
@@ -51,6 +58,14 @@ contract CardMarketplace is ReentrancyGuard, Ownable {
         uint256 price,
         uint256 fee
     );
+    event PrivateDealExecuted(
+        address indexed seller,
+        address indexed buyer,
+        uint256 indexed tokenId,
+        uint256 price,
+        uint256 fee,
+        uint256 nonce
+    );
     event FeeUpdated(uint256 newFeeBps);
     event TreasuryUpdated(address indexed newTreasury);
 
@@ -59,7 +74,7 @@ contract CardMarketplace is ReentrancyGuard, Ownable {
         address kansTokenAddress,
         address initialTreasury,
         address initialOwner
-    ) Ownable(initialOwner) {
+    ) Ownable(initialOwner) EIP712("W3CardMarketplace", "1") {
         require(cardNftAddress != address(0), "Alamat NFT tidak valid");
         require(kansTokenAddress != address(0), "Alamat KANS tidak valid");
         require(initialTreasury != address(0), "Alamat treasury tidak valid");
@@ -166,6 +181,66 @@ contract CardMarketplace is ReentrancyGuard, Ownable {
         }
 
         emit ListingCanceled(listingId, msg.sender, listing.tokenId);
+    }
+
+    /**
+     * @notice Eksekusi kesepakatan jual-beli privat (P2P Deal) yang sudah disetujui penjual via tanda tangan EIP-712.
+     * @dev Pembeli (msg.sender) membayar KANS on-chain dan menerima NFT, meskipun penjual sedang offline!
+     */
+    function executePrivateDeal(
+        uint256 tokenId,
+        uint256 price,
+        address seller,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata sellerSignature
+    ) external nonReentrant {
+        require(price > 0, "Harga harus lebih dari 0");
+        require(block.timestamp <= deadline, "Kesepakatan sudah kadaluarsa");
+        require(!usedDealNonces[nonce], "Nonce kesepakatan sudah digunakan");
+        require(msg.sender != seller, "Tidak bisa membeli kartu sendiri");
+        require(cardNft.ownerOf(tokenId) == seller, "Penjual sudah tidak memiliki kartu ini");
+        require(
+            cardNft.isApprovedForAll(seller, address(this)) ||
+                cardNft.getApproved(tokenId) == address(this),
+            "Penjual belum memberi izin transfer NFT ke Marketplace"
+        );
+
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    PRIVATE_DEAL_TYPEHASH,
+                    seller,
+                    msg.sender,
+                    tokenId,
+                    price,
+                    nonce,
+                    deadline
+                )
+            )
+        );
+
+        address recovered = ECDSA.recover(digest, sellerSignature);
+        require(recovered == seller, "Tanda tangan kesepakatan penjual tidak valid");
+
+        usedDealNonces[nonce] = true;
+
+        uint256 existingListingId = activeListingByToken[tokenId];
+        if (existingListingId != 0 && listings[existingListingId].seller == seller) {
+            listings[existingListingId].active = false;
+            activeListingByToken[tokenId] = 0;
+        }
+
+        uint256 fee = (price * feeBps) / BPS_DENOMINATOR;
+        uint256 sellerAmount = price - fee;
+
+        if (fee > 0) {
+            kansToken.safeTransferFrom(msg.sender, treasury, fee);
+        }
+        kansToken.safeTransferFrom(msg.sender, seller, sellerAmount);
+        cardNft.safeTransferFrom(seller, msg.sender, tokenId);
+
+        emit PrivateDealExecuted(seller, msg.sender, tokenId, price, fee, nonce);
     }
 
     function setFeeBps(uint256 newFeeBps) external onlyOwner {

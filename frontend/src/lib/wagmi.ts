@@ -3,6 +3,44 @@ import { baseSepolia, hardhat } from "wagmi/chains";
 
 export const TARGET_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID || 31337);
 
+export async function switchToTargetNetwork() {
+  if (typeof window === "undefined" || !(window as any).ethereum) return;
+  const ethereum = (window as any).ethereum;
+  const chainIdHex = `0x${TARGET_CHAIN_ID.toString(16)}`;
+
+  try {
+    await ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chainIdHex }],
+    });
+  } catch (err: any) {
+    if (
+      err.code === 4902 ||
+      err?.data?.originalError?.code === 4902 ||
+      err.message?.includes("Unrecognized chain") ||
+      err.message?.includes("not found")
+    ) {
+      await ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: chainIdHex,
+            chainName: TARGET_CHAIN_ID === 31337 ? "Hardhat Localhost" : "Base Sepolia",
+            nativeCurrency: {
+              name: "ETH",
+              symbol: "ETH",
+              decimals: 18,
+            },
+            rpcUrls: [TARGET_CHAIN_ID === 31337 ? "http://127.0.0.1:8545" : "https://sepolia.base.org"],
+          },
+        ],
+      });
+    } else {
+      throw err;
+    }
+  }
+}
+
 export const wagmiConfig = createConfig({
   chains: [hardhat, baseSepolia],
   connectors: [injected()],

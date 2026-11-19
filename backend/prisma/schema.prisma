@@ -26,6 +26,12 @@ model User {
 
   cards  UserCard[]
   lineup Lineup?
+
+  notifications       Notification[]
+  sentOffers          CardOffer[]    @relation("BuyerOffers")
+  receivedOffers      CardOffer[]    @relation("SellerOffers")
+  sentFriendships     Friendship[]   @relation("SentFriendships")
+  receivedFriendships Friendship[]   @relation("ReceivedFriendships")
 }
 
 model Club {
@@ -80,12 +86,14 @@ model UserCard {
   isOnChain   Boolean  @default(false)
   tokenId     Int?     @unique
   isListed    Boolean  @default(false)
+  isLocked    Boolean  @default(false) // Jika true: dikunci oleh pemilik, tidak menerima tawaran / not for sale
   createdAt   DateTime @default(now())
 
   user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   player      Player          @relation(fields: [playerId], references: [id])
   lineupSlots LineupSlot[]
   listings    MarketListing[]
+  offers      CardOffer[]
 }
 
 model Lineup {
@@ -123,4 +131,51 @@ model MarketListing {
   updatedAt    DateTime @updatedAt
 
   userCard UserCard? @relation(fields: [userCardId], references: [id], onDelete: SetNull)
+}
+
+model Friendship {
+  id         String   @id @default(cuid())
+  senderId   String
+  receiverId String
+  status     String   @default("PENDING") // PENDING | ACCEPTED | REJECTED
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  sender   User @relation("SentFriendships", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedFriendships", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+}
+
+model CardOffer {
+  id              String   @id @default(cuid())
+  cardId          String
+  sellerId        String
+  buyerId         String
+  priceKans       String
+  status          String   @default("PENDING") // PENDING | COUNTERED | ACCEPTED | REJECTED | COMPLETED | CANCELLED
+  lastActionBy    String   // ID user yang melakukan aksi terakhir (tawaran / counter)
+  sellerSignature String?  // Tanda tangan EIP-712 penjual saat setuju
+  nonce           Int?
+  deadline        Int?
+  history         String   @default("[]") // JSON string riwayat tawar-menawar
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  card   UserCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  seller User     @relation("SellerOffers", fields: [sellerId], references: [id], onDelete: Cascade)
+  buyer  User     @relation("BuyerOffers", fields: [buyerId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String   // OFFER_RECEIVED | OFFER_COUNTERED | OFFER_ACCEPTED | OFFER_REJECTED | DEAL_COMPLETED | FRIEND_REQUEST | FRIEND_ACCEPTED
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

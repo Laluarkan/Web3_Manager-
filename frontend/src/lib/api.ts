@@ -54,6 +54,7 @@ export interface UserCardData {
   isOnChain: boolean;
   tokenId: number | null;
   isListed: boolean;
+  isLocked?: boolean;
   player: PlayerData;
 }
 
@@ -117,4 +118,47 @@ export async function apiRequest<T>(
     throw new Error(data.error || `Request gagal (${res.status})`);
   }
   return data as T;
+}
+
+export interface ManagerData {
+  id: string;
+  username: string;
+  walletAddress: string | null;
+  freeMatchWins: number;
+  freeMatchPoints: number;
+  freeMatchPlayed: number;
+  createdAt: string;
+  cardCount: number;
+  friendStatus: "NONE" | "PENDING_SENT" | "PENDING_RECEIVED" | "ACCEPTED";
+  friendshipId?: string;
+}
+
+export interface CardOfferData {
+  id: string;
+  cardId: string;
+  sellerId: string;
+  buyerId: string;
+  priceKans: string;
+  status: "PENDING" | "COUNTERED" | "ACCEPTED" | "REJECTED" | "COMPLETED" | "CANCELLED";
+  lastActionBy: string;
+  sellerSignature?: string | null;
+  nonce?: number | null;
+  deadline?: number | null;
+  history: string;
+  createdAt: string;
+  updatedAt: string;
+  card: UserCardData;
+  buyer: { id: string; username: string; walletAddress: string | null };
+  seller: { id: string; username: string; walletAddress: string | null };
+}
+
+export interface NotificationData {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: string;
+  link?: string | null;
+  isRead: boolean;
+  createdAt: string;
 }
