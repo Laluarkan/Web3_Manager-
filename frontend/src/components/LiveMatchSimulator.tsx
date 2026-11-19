@@ -9,8 +9,11 @@ import {
   Flame,
   Shield,
   Activity,
-  AlertTriangle,
 } from "lucide-react";
+import { FootballPitch } from "./match/FootballPitch";
+import { PlayerAgent } from "@/engine/ai/PlayerBehavior";
+import { BallPhysics } from "@/engine/physics/BallPhysics";
+import { MatchCoordinator } from "@/engine/ai/TacticalAI";
 
 export interface SimulationPlayer {
   id: number;
@@ -85,7 +88,7 @@ interface LiveMatchSimulatorProps {
   onFinish: () => void;
 }
 
-// Koordinat formasi dasar 4-3-3 (0 - 100% dimensi lapangan)
+// Koordinat taktis formasi 4-3-3
 const FORMATION_HOME: Record<string, { x: number; y: number }> = {
   GK: { x: 7, y: 50 },
   LB: { x: 24, y: 18 },
@@ -114,32 +117,12 @@ const FORMATION_AWAY: Record<string, { x: number; y: number }> = {
   LW: { x: 32, y: 78 },
 };
 
-interface AgentPlayer {
-  id: number;
-  name: string;
-  position: "GK" | "DF" | "MF" | "FW";
-  slotCode: string;
-  number: number;
-  team: "HOME" | "AWAY";
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  targetX: number;
-  targetY: number;
-  maxSpeed: number;
-  wanderAngle: number;
-  wanderSpeed: number;
-}
-
 export function LiveMatchSimulator({
   simulation,
   earnedPoints,
   onFinish,
 }: LiveMatchSimulatorProps) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  // Match State
+  // State Skor & Waktu Pertandingan
   const [currentMinute, setCurrentMinute] = useState(1);
   const [homeScore, setHomeScore] = useState(0);
   const [awayScore, setAwayScore] = useState(0);
@@ -159,91 +142,114 @@ export function LiveMatchSimulator({
   } | null>(null);
   const [isMatchFinished, setIsMatchFinished] = useState(false);
 
-  // Ball with 3D elevation (z height)
-  const ballPhysicsRef = useRef<{
-    x: number;
-    y: number;
-    z: number; // Ketinggian bola untuk efek 3D parabola
-    targetX: number;
-    targetY: number;
-    targetZ: number;
-    carrierName: string | null;
-    isLofted: boolean;
-  }>({
-    x: 50,
-    y: 50,
-    z: 0,
-    targetX: 50,
-    targetY: 50,
-    targetZ: 0,
-    carrierName: simulation.homePlayers.find((p) => p.slotCode === "ST")?.name || null,
-    isLofted: false,
-  });
+  // Instansiasi Engine Fisika & AI Pertandingan
+  const ballRef = useRef<BallPhysics>(new BallPhysics(50, 50));
+  const agentsRef = useRef<PlayerAgent[]>([]);
+  const coordinatorRef = useRef<MatchCoordinator>(new MatchCoordinator());
 
-  // Active play sequence state
-  const activeSequenceRef = useRef<{
-    seq: AttackSequence;
-    phase: number; // 0.0 to 1.0 progression of sequence
-  } | null>(null);
-
-  // Autonomous agents with Craig Reynolds Steering Behaviors
-  const agentsRef = useRef<AgentPlayer[]>([]);
-
-  // Initialize individual agents
+  // Inisialisasi 22 Pemain sebagai Autonomous Agents
   useEffect(() => {
-    const list: AgentPlayer[] = [];
+    const list: PlayerAgent[] = [];
 
+    // Home Team (11 Pemain)
     simulation.homePlayers.forEach((p, idx) => {
       const anchor = FORMATION_HOME[p.slotCode] || { x: 25, y: 50 };
-      list.push({
-        id: p.id,
-        name: p.name,
-        position: p.position,
-        slotCode: p.slotCode,
-        number: p.number || idx + 1,
-        team: "HOME",
-        x: anchor.x,
-        y: anchor.y,
-        vx: 0,
-        vy: 0,
-        targetX: anchor.x,
-        targetY: anchor.y,
-        maxSpeed: 0.95 + Math.random() * 0.35,
-        wanderAngle: Math.random() * Math.PI * 2,
-        wanderSpeed: 0.03 + Math.random() * 0.02,
-      });
+      list.push(
+        new PlayerAgent({
+          id: p.id,
+          name: p.name,
+          position: p.position,
+          slotCode: p.slotCode,
+          number: p.number || idx + 1,
+          team: "HOME",
+          baseOverall: p.baseOverall || 75,
+          anchor,
+        })
+      );
     });
 
+    // Away Team (11 Pemain)
     simulation.awayPlayers.forEach((p, idx) => {
       const anchor = FORMATION_AWAY[p.slotCode] || { x: 75, y: 50 };
-      list.push({
-        id: p.id,
-        name: p.name,
-        position: p.position,
-        slotCode: p.slotCode,
-        number: p.number || idx + 1,
-        team: "AWAY",
-        x: anchor.x,
-        y: anchor.y,
-        vx: 0,
-        vy: 0,
-        targetX: anchor.x,
-        targetY: anchor.y,
-        maxSpeed: 0.95 + Math.random() * 0.35,
-        wanderAngle: Math.random() * Math.PI * 2,
-        wanderSpeed: 0.03 + Math.random() * 0.02,
-      });
+      list.push(
+        new PlayerAgent({
+          id: p.id,
+          name: p.name,
+          position: p.position,
+          slotCode: p.slotCode,
+          number: p.number || idx + 1,
+          team: "AWAY",
+          baseOverall: p.baseOverall || 75,
+          anchor,
+        })
+      );
     });
 
     agentsRef.current = list;
+
+    // Pasangkan bola di kaki striker awal
+    const homeStriker = list.find((a) => a.team === "HOME" && a.slotCode === "ST") || list[9];
+    if (homeStriker) {
+      ballRef.current.attachToCarrier(
+        homeStriker.id,
+        homeStriker.name,
+        homeStriker.position,
+        homeStriker.facingAngle
+      );
+    }
   }, [simulation]);
 
-  const minuteRef = useRef(1);
+  // Update Taktik Aktif ke Koordinator AI
+  useEffect(() => {
+    coordinatorRef.current.setTactic(activeTactic);
+  }, [activeTactic]);
 
-  // Time loop (10 minutes real time default at 1x speed)
+  // Game Loop Fisika 60 FPS
+  useEffect(() => {
+    let animId: number;
+    let lastTime = performance.now();
+
+    const loop = (currentTime: number) => {
+      const dt = Math.min((currentTime - lastTime) / 1000, 0.1);
+      lastTime = currentTime;
+
+      if (!isPaused && !isMatchFinished) {
+        coordinatorRef.current.update(
+          dt,
+          speedMultiplier,
+          agentsRef.current,
+          ballRef.current,
+          (goalSeq) => {
+            // Callback ketika gol terjadi dari attack sequence
+            if (goalSeq.team === "HOME") {
+              setHomeScore((s) => s + 1);
+            } else {
+              setAwayScore((s) => s + 1);
+            }
+            setGoalCelebration({
+              player: goalSeq.finisherPlayer,
+              team: goalSeq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
+              minute: goalSeq.minute,
+            });
+            setTimeout(() => setGoalCelebration(null), 3600);
+          }
+        );
+      }
+
+      animId = requestAnimationFrame(loop);
+    };
+
+    animId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animId);
+  }, [isPaused, isMatchFinished, speedMultiplier, simulation]);
+
+  // Timeline Pertandingan (Durasi ~10 menit waktu nyata pada kecepatan 1x)
+  const minuteRef = useRef(1);
   useEffect(() => {
     if (isPaused || isMatchFinished) return;
 
+    // 10 menit = 600 detik = 600.000 ms untuk 90 menit pertandingan
+    // 600.000 / 90 = ~6.666 ms per menit sepak bola pada 1x speed
     const intervalTimeMs = Math.max(25, Math.round(6666 / speedMultiplier));
 
     const timer = setInterval(() => {
@@ -251,28 +257,14 @@ export function LiveMatchSimulator({
       const m = minuteRef.current;
       setCurrentMinute(m);
 
-      // 1. Cek apakah di menit ini ada Attack Sequence
+      // Cek apakah menit ini memiliki skenario penyerangan terstruktur
       const seq = simulation.sequences?.find((s) => s.minute === m);
       if (seq) {
-        activeSequenceRef.current = { seq, phase: 0 };
+        coordinatorRef.current.triggerSequence(seq);
         setCurrentCommentary(seq.description);
         setCommentaryHistory((prev) => [{ minute: m, text: seq.description }, ...prev].slice(0, 15));
-
-        if (seq.outcome === "GOAL") {
-          setTimeout(() => {
-            if (seq.team === "HOME") setHomeScore((s) => s + 1);
-            else setAwayScore((s) => s + 1);
-
-            setGoalCelebration({
-              player: seq.finisherPlayer,
-              team: seq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
-              minute: seq.minute,
-            });
-            setTimeout(() => setGoalCelebration(null), 3800);
-          }, 1800);
-        }
       } else {
-        // Cek event umum jika bukan sequence
+        // Cek peristiwa reguler (Kickoff, Halftime, Fulltime, Kartu, dll)
         const ev = simulation.events.find((e) => e.minute === m);
         if (ev) {
           setCurrentCommentary(ev.description);
@@ -303,294 +295,6 @@ export function LiveMatchSimulator({
     setCurrentMinute(90);
     setIsMatchFinished(true);
   };
-
-  // Canvas 60 FPS Render Loop: Steering Behaviors + 3D Ball Parabola + Sequence Execution
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    let animId: number;
-
-    const render = () => {
-      const width = canvas.width;
-      const height = canvas.height;
-      const pad = 24;
-      const pitchW = width - pad * 2;
-      const pitchH = height - pad * 2;
-
-      // 1. Draw Green Pitch Grass with Alternate Stripes
-      ctx.fillStyle = "#1b4d24";
-      ctx.fillRect(0, 0, width, height);
-
-      const stripes = 11;
-      const stripeW = width / stripes;
-      for (let i = 0; i < stripes; i++) {
-        if (i % 2 === 0) {
-          ctx.fillStyle = "#1e5729";
-          ctx.fillRect(i * stripeW, 0, stripeW, height);
-        }
-      }
-
-      // 2. White Pitch Markings
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
-      ctx.lineWidth = 2.5;
-
-      ctx.strokeRect(pad, pad, pitchW, pitchH);
-
-      // Halfway line & Center Circle
-      const midX = width / 2;
-      const midY = height / 2;
-      ctx.beginPath();
-      ctx.moveTo(midX, pad);
-      ctx.lineTo(midX, height - pad);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(midX, midY, height * 0.15, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(midX, midY, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Left Penalty Box & Goal
-      const boxW = width * 0.16;
-      const boxH = height * 0.54;
-      ctx.strokeRect(pad, (height - boxH) / 2, boxW, boxH);
-
-      const smallBoxW = width * 0.06;
-      const smallBoxH = height * 0.28;
-      ctx.strokeRect(pad, (height - smallBoxH) / 2, smallBoxW, smallBoxH);
-
-      ctx.fillStyle = "rgba(255,255,255,0.18)";
-      ctx.fillRect(pad - 12, (height - smallBoxH) / 2, 12, smallBoxH);
-      ctx.strokeRect(pad - 12, (height - smallBoxH) / 2, 12, smallBoxH);
-
-      // Right Penalty Box & Goal
-      ctx.strokeRect(width - pad - boxW, (height - boxH) / 2, boxW, boxH);
-      ctx.strokeRect(width - pad - smallBoxW, (height - smallBoxH) / 2, smallBoxW, smallBoxH);
-
-      ctx.fillRect(width - pad, (height - smallBoxH) / 2, 12, smallBoxH);
-      ctx.strokeRect(width - pad, (height - smallBoxH) / 2, 12, smallBoxH);
-
-      // 3. Play Sequence Execution & Dynamic Ball Interpolation
-      const ball = ballPhysicsRef.current;
-      const currentSeq = activeSequenceRef.current;
-      const actors = agentsRef.current;
-
-      if (currentSeq) {
-        currentSeq.phase += 0.006 * speedMultiplier;
-        const p = currentSeq.phase;
-        const s = currentSeq.seq;
-
-        if (p < 0.28) {
-          // Fase 1: Buildup passing di lini tengah
-          ball.carrierName = s.buildupPlayer;
-          ball.isLofted = false;
-          ball.targetX = s.startCoord.x;
-          ball.targetY = s.startCoord.y;
-          ball.targetZ = 0;
-        } else if (p < 0.55) {
-          // Fase 2: Tusukan ke sayap
-          ball.carrierName = s.wingerPlayer;
-          ball.isLofted = false;
-          ball.targetX = s.wingerCoord.x;
-          ball.targetY = s.wingerCoord.y;
-          ball.targetZ = 0;
-        } else if (p < 0.82) {
-          // Fase 3: Umpan Silang Melambung (3D Parabola Arc)
-          ball.carrierName = null;
-          ball.isLofted = true;
-          const crossT = (p - 0.55) / 0.27; // 0 to 1
-          ball.targetX = s.wingerCoord.x + (s.boxCoord.x - s.wingerCoord.x) * crossT;
-          ball.targetY = s.wingerCoord.y + (s.boxCoord.y - s.wingerCoord.y) * crossT;
-          // Ketinggian parabola 3D: puncak setinggi 42px di tengah-tengah
-          ball.targetZ = Math.sin(crossT * Math.PI) * 42;
-        } else if (p <= 1.0) {
-          // Fase 4: Eksekusi Tembakan ke Gawang
-          ball.carrierName = s.finisherPlayer;
-          ball.isLofted = false;
-          const shotT = (p - 0.82) / 0.18;
-          ball.targetX = s.boxCoord.x + (s.finishCoord.x - s.boxCoord.x) * shotT;
-          ball.targetY = s.boxCoord.y + (s.finishCoord.y - s.boxCoord.y) * shotT;
-          ball.targetZ = Math.sin(shotT * Math.PI) * 8;
-        } else {
-          // Selesai sequence
-          activeSequenceRef.current = null;
-          ball.targetZ = 0;
-        }
-      } else {
-        // Natural midfield roaming when no attack sequence
-        ball.targetZ = 0;
-        ball.targetX += (Math.random() * 0.4 - 0.2);
-        ball.targetY += (Math.random() * 0.4 - 0.2);
-        ball.targetX = Math.max(15, Math.min(85, ball.targetX));
-        ball.targetY = Math.max(15, Math.min(85, ball.targetY));
-      }
-
-      // Smooth Lerp Ball Coordinates
-      ball.x += (ball.targetX - ball.x) * 0.08;
-      ball.y += (ball.targetY - ball.y) * 0.08;
-      ball.z += (ball.targetZ - ball.z) * 0.12;
-
-      // 4. Update Agents with Craig Reynolds Steering Behaviors
-      actors.forEach((a) => {
-        a.wanderAngle += a.wanderSpeed;
-
-        const anchor =
-          a.team === "HOME"
-            ? FORMATION_HOME[a.slotCode] || { x: 30, y: 50 }
-            : FORMATION_AWAY[a.slotCode] || { x: 70, y: 50 };
-
-        const isHome = a.team === "HOME";
-        const tacticShift =
-          activeTactic === "ATTACKING" && isHome
-            ? 7
-            : activeTactic === "DEFENSIVE" && isHome
-            ? -7
-            : 0;
-
-        let desireX = anchor.x + tacticShift;
-        let desireY = anchor.y;
-
-        // Role-specific intelligence
-        if (a.position === "GK") {
-          // Goalkeeper: bergerak vertikal menutup sudut tembakan
-          desireX = isHome ? 7 : 93;
-          desireY = 50 + (ball.y - 50) * 0.42;
-        } else if (a.position === "DF") {
-          // Defender: Menjaga garis offside & menempel striker lawan
-          const ballDist = Math.hypot(a.x - ball.x, a.y - ball.y);
-          if (ballDist < 18 && currentSeq && currentSeq.seq.team !== a.team) {
-            // Berlari menghalau / memblok tembakan!
-            desireX = ball.x + (isHome ? -3 : 3);
-            desireY = ball.y;
-          } else {
-            desireX = anchor.x + (ball.x - 50) * 0.14 + tacticShift;
-            desireY = anchor.y + (ball.y - anchor.y) * 0.25;
-          }
-        } else if (a.position === "MF") {
-          // Midfielder: Membuka passing lane atau menekan pembawa bola
-          desireX = anchor.x + (ball.x - 50) * 0.28 + tacticShift;
-          desireY = anchor.y + (ball.y - anchor.y) * 0.32;
-        } else if (a.position === "FW") {
-          // Forward / Striker: Lari menusuk ke kotak penalti saat serangan aktif
-          if (currentSeq && currentSeq.seq.team === a.team) {
-            desireX = isHome ? Math.min(88, anchor.x + 12) : Math.max(12, anchor.x - 12);
-            desireY = 48 + Math.sin(a.wanderAngle) * 14;
-          } else {
-            desireX = anchor.x + (ball.x - 50) * 0.2 + tacticShift;
-            desireY = anchor.y + Math.cos(a.wanderAngle) * 8;
-          }
-        }
-
-        // Craig Reynolds Separation Force (Mencegah pemain menumpuk / tabrakan)
-        let sepX = 0;
-        let sepY = 0;
-        actors.forEach((other) => {
-          if (other.id !== a.id) {
-            const dist = Math.hypot(a.x - other.x, a.y - other.y);
-            if (dist < 4.5 && dist > 0.01) {
-              const repel = (4.5 - dist) / dist;
-              sepX += (a.x - other.x) * repel * 0.15;
-              sepY += (a.y - other.y) * repel * 0.15;
-            }
-          }
-        });
-
-        // Steering force calculation
-        const steerX = (desireX - a.x) * 0.04 + sepX;
-        const steerY = (desireY - a.y) * 0.04 + sepY;
-
-        a.vx = a.vx * 0.88 + steerX * a.maxSpeed;
-        a.vy = a.vy * 0.88 + steerY * a.maxSpeed;
-
-        a.x += a.vx;
-        a.y += a.vy;
-
-        // Draw Player Dot
-        const px = pad + (a.x / 100) * pitchW;
-        const py = pad + (a.y / 100) * pitchH;
-        const isCarrier = ball.carrierName === a.name;
-
-        // Glowing Carrier Ring
-        if (isCarrier) {
-          ctx.strokeStyle = isHome ? "rgba(52, 211, 153, 0.95)" : "rgba(251, 113, 133, 0.95)";
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.arc(px, py, 14, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-
-        // Player Circle Body
-        ctx.fillStyle =
-          a.position === "GK"
-            ? isHome
-              ? "#f59e0b"
-              : "#ea580c"
-            : isHome
-            ? "#06b6d4"
-            : "#e11d48";
-
-        ctx.beginPath();
-        ctx.arc(px, py, 9.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Jersey Number
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 9px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(String(a.number), px, py);
-
-        // Player Name Tag
-        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
-        ctx.fillRect(px - 26, py - 19, 52, 11);
-        ctx.fillStyle = isHome ? "#38bdf8" : "#fda4af";
-        ctx.font = "8px sans-serif";
-        ctx.fillText(a.name.slice(0, 9), px, py - 13);
-      });
-
-      // 5. Draw Ball with 3D Parabolic Elevation ($Z$-Height)
-      const ballFloorX = pad + (ball.x / 100) * pitchW;
-      const ballFloorY = pad + (ball.y / 100) * pitchH;
-
-      // Ball Shadow (stays on the grass floor, grows larger and more transparent when lofted)
-      const shadowScale = 1 + (ball.z / 35);
-      const shadowAlpha = Math.max(0.12, 0.38 - (ball.z / 100));
-      ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
-      ctx.beginPath();
-      ctx.ellipse(ballFloorX + 2, ballFloorY + 3.5, 5.5 * shadowScale, 3.5 * shadowScale, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Ball Elevated Position (x, y - z)
-      const ballAirY = ballFloorY - ball.z;
-
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(ballFloorX, ballAirY, 5.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = "#000000";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      ctx.fillStyle = "#1e293b";
-      ctx.beginPath();
-      ctx.arc(ballFloorX, ballAirY, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      animId = requestAnimationFrame(render);
-    };
-
-    animId = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(animId);
-  }, [simulation, activeTactic, speedMultiplier]);
 
   return (
     <div className="relative mx-auto flex w-full max-w-5xl flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-5 shadow-2xl">
@@ -672,18 +376,18 @@ export function LiveMatchSimulator({
         </div>
       </div>
 
-      {/* 2. 2D PITCH CANVAS */}
-      <div className="relative overflow-hidden rounded-xl border-2 border-emerald-600/40 shadow-inner">
-        <canvas
-          ref={canvasRef}
-          width={800}
-          height={480}
-          className="w-full h-auto block aspect-[5/3] bg-emerald-950"
+      {/* 2. DYNAMIC FOOTBALL PITCH (STEERING BEHAVIORS & 3D BALL) */}
+      <div className="relative">
+        <FootballPitch
+          agents={agentsRef.current}
+          ball={ballRef.current}
+          homeTeamName={simulation.homeTeamName}
+          awayTeamName={simulation.awayTeamName}
         />
 
         {/* Goal Overlay Celebration */}
         {goalCelebration && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in zoom-in duration-300">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in zoom-in duration-300 pointer-events-none rounded-xl">
             <div className="flex items-center gap-2 rounded-2xl border-2 border-amber-400 bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 px-8 py-4 text-center shadow-2xl">
               <span className="text-4xl animate-bounce">⚽</span>
               <div>
