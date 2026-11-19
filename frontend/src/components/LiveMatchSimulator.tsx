@@ -126,9 +126,17 @@ export function LiveMatchSimulator({
       setGoalCelebration({
         player: goalSeq.finisherPlayer,
         team: goalSeq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
-        minute: goalSeq.minute,
+        minute: goalSeq.minute || minuteRef.current,
       });
       setTimeout(() => setGoalCelebration(null), 3600);
+    };
+
+    engine.onCommentary = (text: string) => {
+      setCurrentCommentary(text);
+      setCommentaryHistory((prev) => [
+        { minute: minuteRef.current, text },
+        ...prev,
+      ].slice(0, 15));
     };
 
     let animId: number;

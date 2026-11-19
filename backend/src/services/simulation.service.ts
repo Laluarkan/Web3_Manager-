@@ -351,19 +351,21 @@ export function buildMatchSimulation(
       else awayShots++;
 
       if (roll < 0.35) {
-        // Outcome 1: Tembakan tepat sasaran ditepis kiper (SAVED)
+        // Outcome 1: Tembakan tepat sasaran ditepis kiper (SAVED -> REBOUND)
         outcome = "SAVED";
         if (isHome) homeOnTarget++;
         else awayOnTarget++;
         finishX = isHome ? 92 : 8;
         finishY = 48 + (Math.random() * 8 - 4);
-        desc = `Penyelamatan hebat! ${finisher.name} menyambut umpan silang dengan sepakan keras, namun ${gk.name} sigap menepis bola!`;
+        desc = `Penyelamatan hebat! ${finisher.name} menyambut umpan silang dengan sepakan keras, namun ${gk.name} sigap menepis bola! Bola muntah memantul liar di kotak penalti!`;
       } else if (roll < 0.60) {
-        // Outcome 2: Dicegah dan diblok oleh bek (BLOCKED)
+        // Outcome 2: Dicegah dan diblok oleh bek (BLOCKED -> CORNER)
         outcome = "BLOCKED";
         finishX = isHome ? 84 : 16;
         finishY = 50 + (Math.random() * 10 - 5);
-        desc = `Peluang diblok! ${finisher.name} siap menembak, tetapi bek tangguh ${defender.name} meluncur melakukan blok krusial!`;
+        if (isHome) homeCorners++;
+        else awayCorners++;
+        desc = `Peluang diblok! ${finisher.name} siap menembak, tetapi bek tangguh ${defender.name} meluncur melakukan blok krusial menghasilkan sepak pojok!`;
       } else if (roll < 0.82) {
         // Outcome 3: Tembakan meleset tipis ke samping / melambung (WIDE)
         outcome = "WIDE";

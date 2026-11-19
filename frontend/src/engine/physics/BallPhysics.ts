@@ -30,6 +30,15 @@ export class BallPhysics {
     this.z = 0;
   }
 
+  /** Tempatkan bola di koordinat tertentu (mati) untuk tendangan bebas, penalti, sepak pojok, dll */
+  placeAt(x: number, y: number) {
+    this.carrier = null;
+    this.mode = "LOOSE";
+    this.position.set(x, y);
+    this.velocity.set(0, 0);
+    this.z = 0;
+  }
+
   /** Operan datar / tembakan */
   pass(target: Vector2D, speed: number) {
     this.carrier = null;
