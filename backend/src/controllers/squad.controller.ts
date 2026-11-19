@@ -9,6 +9,7 @@ import {
   signStarterPackVoucher,
   upgradeOnChainCardLevel,
 } from "../services/blockchain.service";
+import { buildMatchSimulation } from "../services/simulation.service";
 
 const updateLineupSchema = z.object({
   slots: z
@@ -432,11 +433,23 @@ export async function playFreeMatch(req: AuthRequest, res: Response) {
         freeMatchPoints: { increment: earnedPoints },
       },
       select: {
+        username: true,
         freeMatchPlayed: true,
         freeMatchWins: true,
         freeMatchPoints: true,
       },
     });
+
+    const simulation = buildMatchSimulation(
+      updatedUser.username || "Tim Anda",
+      opp.name,
+      lineup.slots,
+      myGoals,
+      oppGoals,
+      myRating,
+      opp.rating,
+      possession
+    );
 
     res.json({
       mode: "FREE_TO_PLAY",
@@ -450,6 +463,7 @@ export async function playFreeMatch(req: AuthRequest, res: Response) {
       scorers,
       earnedPoints,
       stats: updatedUser,
+      simulation,
     });
   } catch (err) {
     console.error("Free match error:", err);
@@ -677,8 +691,19 @@ export async function playPvpMatch(req: AuthRequest, res: Response) {
         freeMatchWins: outcome === "WIN" ? { increment: 1 } : undefined,
         freeMatchPoints: { increment: earnedPoints },
       },
-      select: { freeMatchPlayed: true, freeMatchWins: true, freeMatchPoints: true },
+      select: { username: true, freeMatchPlayed: true, freeMatchWins: true, freeMatchPoints: true },
     });
+
+    const simulation = buildMatchSimulation(
+      updatedUser.username || "Tim Anda",
+      oppUser.username,
+      myLineup.slots,
+      myGoals,
+      oppGoals,
+      myRating,
+      oppRating,
+      possession
+    );
 
     res.json({
       mode: "PVP_FREE",
@@ -692,6 +717,7 @@ export async function playPvpMatch(req: AuthRequest, res: Response) {
       scorers,
       earnedPoints,
       stats: updatedUser,
+      simulation,
     });
   } catch (err) {
     console.error("PvP match error:", err);

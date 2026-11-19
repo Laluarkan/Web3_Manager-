@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Lock, Medal, Swords, Trophy, Users, Wallet } from "lucide-react";
 import { useAuth } from "@/components/Providers";
 import { apiRequest } from "@/lib/api";
+import { LiveMatchSimulator, SimulationData } from "@/components/LiveMatchSimulator";
 
 interface MatchResult {
   mode: string;
@@ -17,6 +18,7 @@ interface MatchResult {
   possession: { my: number; opp: number };
   scorers: string[];
   earnedPoints: number;
+  simulation?: SimulationData;
 }
 
 interface PvpOpponent {
@@ -44,6 +46,8 @@ export default function MatchPage() {
   const [difficulty, setDifficulty] = useState<"AMATEUR" | "PRO" | "WORLD_CLASS">("AMATEUR");
   const [tactic, setTactic] = useState<"ATTACKING" | "BALANCED" | "DEFENSIVE">("BALANCED");
   const [result, setResult] = useState<MatchResult | null>(null);
+  const [activeSimulation, setActiveSimulation] = useState<SimulationData | null>(null);
+  const [simEarnedPoints, setSimEarnedPoints] = useState<number>(0);
   const [opponents, setOpponents] = useState<PvpOpponent[]>([]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -86,7 +90,12 @@ export default function MatchPage() {
         method: "POST",
         body: JSON.stringify({ difficulty, tactic }),
       });
-      setResult(data);
+      if (data.simulation) {
+        setActiveSimulation(data.simulation);
+        setSimEarnedPoints(data.earnedPoints);
+      } else {
+        setResult(data);
+      }
       await refreshUser();
       await loadArenaData();
     } catch (err: any) {
@@ -103,7 +112,12 @@ export default function MatchPage() {
         method: "POST",
         body: JSON.stringify({ opponentUserId, tactic }),
       });
-      setResult(data);
+      if (data.simulation) {
+        setActiveSimulation(data.simulation);
+        setSimEarnedPoints(data.earnedPoints);
+      } else {
+        setResult(data);
+      }
       await refreshUser();
       await loadArenaData();
     } catch (err: any) {
@@ -156,8 +170,23 @@ export default function MatchPage() {
         </div>
       </div>
 
-      {/* Hasil Match Terbaru */}
-      {result && (
+      {/* 2D Top Eleven Live Simulation */}
+      {activeSimulation && (
+        <div className="my-2">
+          <LiveMatchSimulator
+            simulation={activeSimulation}
+            earnedPoints={simEarnedPoints}
+            onFinish={() => {
+              setActiveSimulation(null);
+              refreshUser();
+              loadArenaData();
+            }}
+          />
+        </div>
+      )}
+
+      {/* Hasil Match Terbaru (Legacy Quick Result / Summary) */}
+      {result && !activeSimulation && (
         <div className="rounded-2xl border border-emerald-500/40 bg-slate-900 p-5 shadow-xl">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>
