@@ -9,7 +9,7 @@ import {
   Flame,
   Shield,
   Activity,
-  Award,
+  AlertTriangle,
 } from "lucide-react";
 
 export interface SimulationPlayer {
@@ -19,6 +19,24 @@ export interface SimulationPlayer {
   slotCode: string;
   number: number;
   baseOverall: number;
+}
+
+export interface AttackSequence {
+  id: string;
+  minute: number;
+  team: "HOME" | "AWAY";
+  buildupPlayer: string;
+  wingerPlayer: string;
+  finisherPlayer: string;
+  defenderPlayer: string;
+  gkPlayer: string;
+  outcome: "GOAL" | "SAVED" | "BLOCKED" | "WIDE" | "POST" | "TACKLED";
+  description: string;
+  isLoftedCross: boolean;
+  startCoord: { x: number; y: number };
+  wingerCoord: { x: number; y: number };
+  boxCoord: { x: number; y: number };
+  finishCoord: { x: number; y: number };
 }
 
 export interface MatchEvent {
@@ -50,6 +68,7 @@ export interface SimulationData {
   homePlayers: SimulationPlayer[];
   awayPlayers: SimulationPlayer[];
   events: MatchEvent[];
+  sequences?: AttackSequence[];
   stats: {
     shots: { home: number; away: number };
     shotsOnTarget: { home: number; away: number };
@@ -66,33 +85,33 @@ interface LiveMatchSimulatorProps {
   onFinish: () => void;
 }
 
-// Koordinat jangkar formasi 4-3-3 (dalam persentase lapangan 0 - 100)
-const ANCHOR_HOME: Record<string, { x: number; y: number }> = {
+// Koordinat formasi dasar 4-3-3 (0 - 100% dimensi lapangan)
+const FORMATION_HOME: Record<string, { x: number; y: number }> = {
   GK: { x: 7, y: 50 },
-  LB: { x: 23, y: 16 },
+  LB: { x: 24, y: 18 },
   LCB: { x: 19, y: 38 },
   RCB: { x: 19, y: 62 },
-  RB: { x: 23, y: 84 },
+  RB: { x: 24, y: 82 },
   LCM: { x: 42, y: 32 },
   CM: { x: 38, y: 50 },
   RCM: { x: 42, y: 68 },
-  LW: { x: 67, y: 20 },
-  ST: { x: 74, y: 50 },
-  RW: { x: 67, y: 80 },
+  LW: { x: 68, y: 22 },
+  ST: { x: 75, y: 50 },
+  RW: { x: 68, y: 78 },
 };
 
-const ANCHOR_AWAY: Record<string, { x: number; y: number }> = {
+const FORMATION_AWAY: Record<string, { x: number; y: number }> = {
   GK: { x: 93, y: 50 },
-  RB: { x: 77, y: 16 },
+  RB: { x: 76, y: 18 },
   RCB: { x: 81, y: 38 },
   LCB: { x: 81, y: 62 },
-  LB: { x: 77, y: 84 },
+  LB: { x: 76, y: 82 },
   RCM: { x: 58, y: 32 },
   CM: { x: 62, y: 50 },
   LCM: { x: 58, y: 68 },
-  RW: { x: 33, y: 20 },
-  ST: { x: 26, y: 50 },
-  LW: { x: 33, y: 80 },
+  RW: { x: 32, y: 22 },
+  ST: { x: 25, y: 50 },
+  LW: { x: 32, y: 78 },
 };
 
 interface AgentPlayer {
@@ -104,14 +123,13 @@ interface AgentPlayer {
   team: "HOME" | "AWAY";
   x: number;
   y: number;
-  targetX: number;
-  targetY: number;
   vx: number;
   vy: number;
-  speed: number;
-  wanderPhase: number;
+  targetX: number;
+  targetY: number;
+  maxSpeed: number;
+  wanderAngle: number;
   wanderSpeed: number;
-  isCarrier: boolean;
 }
 
 export function LiveMatchSimulator({
@@ -128,8 +146,12 @@ export function LiveMatchSimulator({
   const [isPaused, setIsPaused] = useState(false);
   const [speedMultiplier, setSpeedMultiplier] = useState<number>(1);
   const [activeTactic, setActiveTactic] = useState<"DEFENSIVE" | "BALANCED" | "ATTACKING">("BALANCED");
-  const [currentEvent, setCurrentEvent] = useState<MatchEvent | null>(simulation.events[0] || null);
-  const [eventHistory, setEventHistory] = useState<MatchEvent[]>([simulation.events[0] || null].filter(Boolean));
+  const [currentCommentary, setCurrentCommentary] = useState<string>(
+    simulation.events[0]?.description || "Wasit memulai babak pertama!"
+  );
+  const [commentaryHistory, setCommentaryHistory] = useState<Array<{ minute: number; text: string }>>([
+    { minute: 1, text: simulation.events[0]?.description || "Pertandingan dimulai!" },
+  ]);
   const [goalCelebration, setGoalCelebration] = useState<{
     player: string;
     team: string;
@@ -137,39 +159,42 @@ export function LiveMatchSimulator({
   } | null>(null);
   const [isMatchFinished, setIsMatchFinished] = useState(false);
 
-  // Ball physics & state
-  const ballRef = useRef<{
+  // Ball with 3D elevation (z height)
+  const ballPhysicsRef = useRef<{
     x: number;
     y: number;
+    z: number; // Ketinggian bola untuk efek 3D parabola
     targetX: number;
     targetY: number;
-    vx: number;
-    vy: number;
-    state: "CARRIED" | "PASSING" | "SHOOTING" | "LOOSE";
-    passProgress: number;
-    carrierId: number | null;
+    targetZ: number;
+    carrierName: string | null;
+    isLofted: boolean;
   }>({
     x: 50,
     y: 50,
+    z: 0,
     targetX: 50,
     targetY: 50,
-    vx: 0,
-    vy: 0,
-    state: "CARRIED",
-    passProgress: 1,
-    carrierId: simulation.homePlayers.find((p) => p.slotCode === "ST")?.id || null,
+    targetZ: 0,
+    carrierName: simulation.homePlayers.find((p) => p.slotCode === "ST")?.name || null,
+    isLofted: false,
   });
 
-  // Agent players list
+  // Active play sequence state
+  const activeSequenceRef = useRef<{
+    seq: AttackSequence;
+    phase: number; // 0.0 to 1.0 progression of sequence
+  } | null>(null);
+
+  // Autonomous agents with Craig Reynolds Steering Behaviors
   const agentsRef = useRef<AgentPlayer[]>([]);
 
   // Initialize individual agents
   useEffect(() => {
     const list: AgentPlayer[] = [];
 
-    // Home players
     simulation.homePlayers.forEach((p, idx) => {
-      const anchor = ANCHOR_HOME[p.slotCode] || { x: 25, y: 50 };
+      const anchor = FORMATION_HOME[p.slotCode] || { x: 25, y: 50 };
       list.push({
         id: p.id,
         name: p.name,
@@ -179,20 +204,18 @@ export function LiveMatchSimulator({
         team: "HOME",
         x: anchor.x,
         y: anchor.y,
-        targetX: anchor.x,
-        targetY: anchor.y,
         vx: 0,
         vy: 0,
-        speed: 0.85 + Math.random() * 0.35,
-        wanderPhase: Math.random() * Math.PI * 2,
-        wanderSpeed: 0.02 + Math.random() * 0.03,
-        isCarrier: p.slotCode === "ST",
+        targetX: anchor.x,
+        targetY: anchor.y,
+        maxSpeed: 0.95 + Math.random() * 0.35,
+        wanderAngle: Math.random() * Math.PI * 2,
+        wanderSpeed: 0.03 + Math.random() * 0.02,
       });
     });
 
-    // Away players
     simulation.awayPlayers.forEach((p, idx) => {
-      const anchor = ANCHOR_AWAY[p.slotCode] || { x: 75, y: 50 };
+      const anchor = FORMATION_AWAY[p.slotCode] || { x: 75, y: 50 };
       list.push({
         id: p.id,
         name: p.name,
@@ -202,14 +225,13 @@ export function LiveMatchSimulator({
         team: "AWAY",
         x: anchor.x,
         y: anchor.y,
-        targetX: anchor.x,
-        targetY: anchor.y,
         vx: 0,
         vy: 0,
-        speed: 0.85 + Math.random() * 0.35,
-        wanderPhase: Math.random() * Math.PI * 2,
-        wanderSpeed: 0.02 + Math.random() * 0.03,
-        isCarrier: false,
+        targetX: anchor.x,
+        targetY: anchor.y,
+        maxSpeed: 0.95 + Math.random() * 0.35,
+        wanderAngle: Math.random() * Math.PI * 2,
+        wanderSpeed: 0.03 + Math.random() * 0.02,
       });
     });
 
@@ -217,9 +239,8 @@ export function LiveMatchSimulator({
   }, [simulation]);
 
   const minuteRef = useRef(1);
-  const matchFinishedRef = useRef(false);
 
-  // Time loop (10 minute match duration default at 1x speed: 1 match minute = ~6.6s)
+  // Time loop (10 minutes real time default at 1x speed)
   useEffect(() => {
     if (isPaused || isMatchFinished) return;
 
@@ -230,65 +251,37 @@ export function LiveMatchSimulator({
       const m = minuteRef.current;
       setCurrentMinute(m);
 
-      // Check event trigger
-      const nextEvent = simulation.events.find((e) => e.minute === m);
-      if (nextEvent) {
-        setCurrentEvent(nextEvent);
-        setEventHistory((prev) => [nextEvent, ...prev].slice(0, 15));
+      // 1. Cek apakah di menit ini ada Attack Sequence
+      const seq = simulation.sequences?.find((s) => s.minute === m);
+      if (seq) {
+        activeSequenceRef.current = { seq, phase: 0 };
+        setCurrentCommentary(seq.description);
+        setCommentaryHistory((prev) => [{ minute: m, text: seq.description }, ...prev].slice(0, 15));
 
-        // Find passer and receiver
-        const actors = agentsRef.current;
-        const passer = actors.find((a) => a.name === nextEvent.player && a.team === nextEvent.team);
-        const receiver = actors.find(
-          (a) => a.name === nextEvent.targetPlayer && a.team === nextEvent.team
-        );
+        if (seq.outcome === "GOAL") {
+          setTimeout(() => {
+            if (seq.team === "HOME") setHomeScore((s) => s + 1);
+            else setAwayScore((s) => s + 1);
 
-        if (nextEvent.type === "GOAL") {
-          // Ball shoots into goal
-          const targetGoal = nextEvent.team === "HOME" ? { x: 97, y: 50 } : { x: 3, y: 50 };
-          ballRef.current.state = "SHOOTING";
-          ballRef.current.targetX = targetGoal.x;
-          ballRef.current.targetY = targetGoal.y;
-
-          if (nextEvent.team === "HOME") {
-            setHomeScore((s) => s + 1);
-          } else {
-            setAwayScore((s) => s + 1);
-          }
-
-          setGoalCelebration({
-            player: nextEvent.player,
-            team: nextEvent.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
-            minute: nextEvent.minute,
-          });
-          setTimeout(() => setGoalCelebration(null), 3800);
-        } else if (nextEvent.type === "PASS" && receiver) {
-          // Ball kicked from passer to receiver
-          ballRef.current.state = "PASSING";
-          ballRef.current.passProgress = 0;
-          ballRef.current.carrierId = receiver.id;
-          ballRef.current.targetX = receiver.x;
-          ballRef.current.targetY = receiver.y;
-        } else if (nextEvent.type === "SAVE") {
-          // Shot towards goal then stopped by GK
-          const isHome = nextEvent.team === "HOME";
-          ballRef.current.state = "SHOOTING";
-          ballRef.current.targetX = isHome ? 92 : 8;
-          ballRef.current.targetY = 48 + (Math.random() * 8 - 4);
-        } else {
-          // Dribbling phase
-          if (passer) {
-            ballRef.current.state = "CARRIED";
-            ballRef.current.carrierId = passer.id;
-            ballRef.current.targetX = nextEvent.ballCoord.x;
-            ballRef.current.targetY = nextEvent.ballCoord.y;
-          }
+            setGoalCelebration({
+              player: seq.finisherPlayer,
+              team: seq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
+              minute: seq.minute,
+            });
+            setTimeout(() => setGoalCelebration(null), 3800);
+          }, 1800);
+        }
+      } else {
+        // Cek event umum jika bukan sequence
+        const ev = simulation.events.find((e) => e.minute === m);
+        if (ev) {
+          setCurrentCommentary(ev.description);
+          setCommentaryHistory((prev) => [{ minute: m, text: ev.description }, ...prev].slice(0, 15));
         }
       }
 
       if (m >= 90) {
         clearInterval(timer);
-        matchFinishedRef.current = true;
         setIsMatchFinished(true);
       }
     }, intervalTimeMs);
@@ -309,10 +302,9 @@ export function LiveMatchSimulator({
     setAwayScore(a);
     setCurrentMinute(90);
     setIsMatchFinished(true);
-    matchFinishedRef.current = true;
   };
 
-  // Canvas 60 FPS Render Loop (Agents AI + Real Ball Physics)
+  // Canvas 60 FPS Render Loop: Steering Behaviors + 3D Ball Parabola + Sequence Execution
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -328,7 +320,7 @@ export function LiveMatchSimulator({
       const pitchW = width - pad * 2;
       const pitchH = height - pad * 2;
 
-      // 1. Draw Green Pitch Grass with Alternate Vertical Stripes
+      // 1. Draw Green Pitch Grass with Alternate Stripes
       ctx.fillStyle = "#1b4d24";
       ctx.fillRect(0, 0, width, height);
 
@@ -342,13 +334,12 @@ export function LiveMatchSimulator({
       }
 
       // 2. White Pitch Markings
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
       ctx.lineWidth = 2.5;
 
-      // Outer boundary lines
       ctx.strokeRect(pad, pad, pitchW, pitchH);
 
-      // Halfway line
+      // Halfway line & Center Circle
       const midX = width / 2;
       const midY = height / 2;
       ctx.beginPath();
@@ -356,10 +347,10 @@ export function LiveMatchSimulator({
       ctx.lineTo(midX, height - pad);
       ctx.stroke();
 
-      // Center Circle & Spot
       ctx.beginPath();
       ctx.arc(midX, midY, height * 0.15, 0, Math.PI * 2);
       ctx.stroke();
+
       ctx.fillStyle = "#ffffff";
       ctx.beginPath();
       ctx.arc(midX, midY, 3.5, 0, Math.PI * 2);
@@ -374,8 +365,7 @@ export function LiveMatchSimulator({
       const smallBoxH = height * 0.28;
       ctx.strokeRect(pad, (height - smallBoxH) / 2, smallBoxW, smallBoxH);
 
-      // Left Net
-      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
       ctx.fillRect(pad - 12, (height - smallBoxH) / 2, 12, smallBoxH);
       ctx.strokeRect(pad - 12, (height - smallBoxH) / 2, 12, smallBoxH);
 
@@ -383,91 +373,148 @@ export function LiveMatchSimulator({
       ctx.strokeRect(width - pad - boxW, (height - boxH) / 2, boxW, boxH);
       ctx.strokeRect(width - pad - smallBoxW, (height - smallBoxH) / 2, smallBoxW, smallBoxH);
 
-      // Right Net
       ctx.fillRect(width - pad, (height - smallBoxH) / 2, 12, smallBoxH);
       ctx.strokeRect(width - pad, (height - smallBoxH) / 2, 12, smallBoxH);
 
-      // 3. Update & Draw Autonomous Agents (Steering & Role Logic)
+      // 3. Play Sequence Execution & Dynamic Ball Interpolation
+      const ball = ballPhysicsRef.current;
+      const currentSeq = activeSequenceRef.current;
       const actors = agentsRef.current;
-      const ball = ballRef.current;
 
-      // Find current carrier agent
-      const carrier = actors.find((a) => a.id === ball.carrierId) || actors[0];
+      if (currentSeq) {
+        currentSeq.phase += 0.006 * speedMultiplier;
+        const p = currentSeq.phase;
+        const s = currentSeq.seq;
 
+        if (p < 0.28) {
+          // Fase 1: Buildup passing di lini tengah
+          ball.carrierName = s.buildupPlayer;
+          ball.isLofted = false;
+          ball.targetX = s.startCoord.x;
+          ball.targetY = s.startCoord.y;
+          ball.targetZ = 0;
+        } else if (p < 0.55) {
+          // Fase 2: Tusukan ke sayap
+          ball.carrierName = s.wingerPlayer;
+          ball.isLofted = false;
+          ball.targetX = s.wingerCoord.x;
+          ball.targetY = s.wingerCoord.y;
+          ball.targetZ = 0;
+        } else if (p < 0.82) {
+          // Fase 3: Umpan Silang Melambung (3D Parabola Arc)
+          ball.carrierName = null;
+          ball.isLofted = true;
+          const crossT = (p - 0.55) / 0.27; // 0 to 1
+          ball.targetX = s.wingerCoord.x + (s.boxCoord.x - s.wingerCoord.x) * crossT;
+          ball.targetY = s.wingerCoord.y + (s.boxCoord.y - s.wingerCoord.y) * crossT;
+          // Ketinggian parabola 3D: puncak setinggi 42px di tengah-tengah
+          ball.targetZ = Math.sin(crossT * Math.PI) * 42;
+        } else if (p <= 1.0) {
+          // Fase 4: Eksekusi Tembakan ke Gawang
+          ball.carrierName = s.finisherPlayer;
+          ball.isLofted = false;
+          const shotT = (p - 0.82) / 0.18;
+          ball.targetX = s.boxCoord.x + (s.finishCoord.x - s.boxCoord.x) * shotT;
+          ball.targetY = s.boxCoord.y + (s.finishCoord.y - s.boxCoord.y) * shotT;
+          ball.targetZ = Math.sin(shotT * Math.PI) * 8;
+        } else {
+          // Selesai sequence
+          activeSequenceRef.current = null;
+          ball.targetZ = 0;
+        }
+      } else {
+        // Natural midfield roaming when no attack sequence
+        ball.targetZ = 0;
+        ball.targetX += (Math.random() * 0.4 - 0.2);
+        ball.targetY += (Math.random() * 0.4 - 0.2);
+        ball.targetX = Math.max(15, Math.min(85, ball.targetX));
+        ball.targetY = Math.max(15, Math.min(85, ball.targetY));
+      }
+
+      // Smooth Lerp Ball Coordinates
+      ball.x += (ball.targetX - ball.x) * 0.08;
+      ball.y += (ball.targetY - ball.y) * 0.08;
+      ball.z += (ball.targetZ - ball.z) * 0.12;
+
+      // 4. Update Agents with Craig Reynolds Steering Behaviors
       actors.forEach((a) => {
-        a.wanderPhase += a.wanderSpeed;
+        a.wanderAngle += a.wanderSpeed;
 
         const anchor =
           a.team === "HOME"
-            ? ANCHOR_HOME[a.slotCode] || { x: 30, y: 50 }
-            : ANCHOR_AWAY[a.slotCode] || { x: 70, y: 50 };
-
-        // Unique Individual Movement based on Role
-        let desireX = anchor.x;
-        let desireY = anchor.y;
+            ? FORMATION_HOME[a.slotCode] || { x: 30, y: 50 }
+            : FORMATION_AWAY[a.slotCode] || { x: 70, y: 50 };
 
         const isHome = a.team === "HOME";
-        const tacticPush =
+        const tacticShift =
           activeTactic === "ATTACKING" && isHome
-            ? 8
+            ? 7
             : activeTactic === "DEFENSIVE" && isHome
-            ? -8
+            ? -7
             : 0;
 
+        let desireX = anchor.x + tacticShift;
+        let desireY = anchor.y;
+
+        // Role-specific intelligence
         if (a.position === "GK") {
-          // Goalkeeper: only stays in goal area and moves vertically tracking ball Y
+          // Goalkeeper: bergerak vertikal menutup sudut tembakan
           desireX = isHome ? 7 : 93;
-          desireY = 50 + (ball.y - 50) * 0.45;
+          desireY = 50 + (ball.y - 50) * 0.42;
         } else if (a.position === "DF") {
-          // Defender: Holds defensive line, shifts when ball is near, stays between ball and goal
-          const lineX = anchor.x + tacticPush;
-          desireX = isHome ? Math.min(42, lineX + (ball.x - 50) * 0.15) : Math.max(58, lineX + (ball.x - 50) * 0.15);
-          desireY = anchor.y + (ball.y - anchor.y) * 0.25;
-        } else if (a.position === "MF") {
-          // Midfielder: Roams to create passing triangles or press carrier
+          // Defender: Menjaga garis offside & menempel striker lawan
           const ballDist = Math.hypot(a.x - ball.x, a.y - ball.y);
-          if (ballDist < 25 && a.team !== carrier?.team) {
-            // Pressing ball carrier!
+          if (ballDist < 18 && currentSeq && currentSeq.seq.team !== a.team) {
+            // Berlari menghalau / memblok tembakan!
             desireX = ball.x + (isHome ? -3 : 3);
             desireY = ball.y;
           } else {
-            // Support passing lane
-            desireX = anchor.x + (ball.x - 50) * 0.3 + tacticPush;
-            desireY = anchor.y + (ball.y - anchor.y) * 0.35;
+            desireX = anchor.x + (ball.x - 50) * 0.14 + tacticShift;
+            desireY = anchor.y + (ball.y - anchor.y) * 0.25;
           }
+        } else if (a.position === "MF") {
+          // Midfielder: Membuka passing lane atau menekan pembawa bola
+          desireX = anchor.x + (ball.x - 50) * 0.28 + tacticShift;
+          desireY = anchor.y + (ball.y - anchor.y) * 0.32;
         } else if (a.position === "FW") {
-          // Forward / Wingers: Making attacking runs towards goal
-          if (a.slotCode === "ST") {
-            // Striker cuts into penalty box
-            desireX = isHome ? Math.min(88, anchor.x + 8 + (ball.x - 50) * 0.25) : Math.max(12, anchor.x - 8 + (ball.x - 50) * 0.25);
-            desireY = 50 + Math.sin(a.wanderPhase) * 16;
+          // Forward / Striker: Lari menusuk ke kotak penalti saat serangan aktif
+          if (currentSeq && currentSeq.seq.team === a.team) {
+            desireX = isHome ? Math.min(88, anchor.x + 12) : Math.max(12, anchor.x - 12);
+            desireY = 48 + Math.sin(a.wanderAngle) * 14;
           } else {
-            // Wingers stay wide and push forward
-            desireX = isHome ? Math.min(84, anchor.x + 6 + (ball.x - 50) * 0.2) : Math.max(16, anchor.x - 6 + (ball.x - 50) * 0.2);
-            desireY = anchor.y + Math.cos(a.wanderPhase) * 8;
+            desireX = anchor.x + (ball.x - 50) * 0.2 + tacticShift;
+            desireY = anchor.y + Math.cos(a.wanderAngle) * 8;
           }
         }
 
-        // Add personal organic wander jitter so each player moves independently!
-        const jitterX = Math.sin(a.wanderPhase) * 2.2;
-        const jitterY = Math.cos(a.wanderPhase * 1.3) * 2.8;
+        // Craig Reynolds Separation Force (Mencegah pemain menumpuk / tabrakan)
+        let sepX = 0;
+        let sepY = 0;
+        actors.forEach((other) => {
+          if (other.id !== a.id) {
+            const dist = Math.hypot(a.x - other.x, a.y - other.y);
+            if (dist < 4.5 && dist > 0.01) {
+              const repel = (4.5 - dist) / dist;
+              sepX += (a.x - other.x) * repel * 0.15;
+              sepY += (a.y - other.y) * repel * 0.15;
+            }
+          }
+        });
 
-        a.targetX = desireX + jitterX;
-        a.targetY = desireY + jitterY;
+        // Steering force calculation
+        const steerX = (desireX - a.x) * 0.04 + sepX;
+        const steerY = (desireY - a.y) * 0.04 + sepY;
 
-        // Smooth velocity interpolation (Euler Integration)
-        const dx = a.targetX - a.x;
-        const dy = a.targetY - a.y;
-        a.vx = a.vx * 0.85 + dx * 0.04 * a.speed;
-        a.vy = a.vy * 0.85 + dy * 0.04 * a.speed;
+        a.vx = a.vx * 0.88 + steerX * a.maxSpeed;
+        a.vy = a.vy * 0.88 + steerY * a.maxSpeed;
 
         a.x += a.vx;
         a.y += a.vy;
 
-        // Draw Player
+        // Draw Player Dot
         const px = pad + (a.x / 100) * pitchW;
         const py = pad + (a.y / 100) * pitchH;
-        const isCarrier = a.id === ball.carrierId;
+        const isCarrier = ball.carrierName === a.name;
 
         // Glowing Carrier Ring
         if (isCarrier) {
@@ -478,7 +525,7 @@ export function LiveMatchSimulator({
           ctx.stroke();
         }
 
-        // Body Circle (Team Colors)
+        // Player Circle Body
         ctx.fillStyle =
           a.position === "GK"
             ? isHome
@@ -495,7 +542,7 @@ export function LiveMatchSimulator({
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Player Number
+        // Jersey Number
         ctx.fillStyle = "#ffffff";
         ctx.font = "bold 9px sans-serif";
         ctx.textAlign = "center";
@@ -510,49 +557,32 @@ export function LiveMatchSimulator({
         ctx.fillText(a.name.slice(0, 9), px, py - 13);
       });
 
-      // 4. Real Foot-to-Foot Ball Physics
-      if (ball.state === "CARRIED" && carrier) {
-        // Glued to carrier feet with natural dribble oscillation
-        const dribbleOffset = Math.sin(Date.now() * 0.012) * 1.5;
-        const forwardDir = carrier.team === "HOME" ? 2.5 : -2.5;
-        ball.x = carrier.x + forwardDir + dribbleOffset;
-        ball.y = carrier.y;
-      } else if (ball.state === "PASSING") {
-        // Ball travels to target with smooth deceleration
-        ball.x += (ball.targetX - ball.x) * 0.09;
-        ball.y += (ball.targetY - ball.y) * 0.09;
+      // 5. Draw Ball with 3D Parabolic Elevation ($Z$-Height)
+      const ballFloorX = pad + (ball.x / 100) * pitchW;
+      const ballFloorY = pad + (ball.y / 100) * pitchH;
 
-        if (Math.hypot(ball.x - ball.targetX, ball.y - ball.targetY) < 1.8) {
-          ball.state = "CARRIED";
-        }
-      } else if (ball.state === "SHOOTING") {
-        // High speed strike
-        ball.x += (ball.targetX - ball.x) * 0.14;
-        ball.y += (ball.targetY - ball.y) * 0.14;
-      }
-
-      const ballRealX = pad + (ball.x / 100) * pitchW;
-      const ballRealY = pad + (ball.y / 100) * pitchH;
-
-      // Draw Ball Shadow
-      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      // Ball Shadow (stays on the grass floor, grows larger and more transparent when lofted)
+      const shadowScale = 1 + (ball.z / 35);
+      const shadowAlpha = Math.max(0.12, 0.38 - (ball.z / 100));
+      ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
       ctx.beginPath();
-      ctx.ellipse(ballRealX + 2, ballRealY + 3.5, 6, 3.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(ballFloorX + 2, ballFloorY + 3.5, 5.5 * shadowScale, 3.5 * shadowScale, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Draw Ball Body
+      // Ball Elevated Position (x, y - z)
+      const ballAirY = ballFloorY - ball.z;
+
       ctx.fillStyle = "#ffffff";
       ctx.beginPath();
-      ctx.arc(ballRealX, ballRealY, 5.5, 0, Math.PI * 2);
+      ctx.arc(ballFloorX, ballAirY, 5.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = "#000000";
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Ball Hexagonal Spot
       ctx.fillStyle = "#1e293b";
       ctx.beginPath();
-      ctx.arc(ballRealX, ballRealY, 2.2, 0, Math.PI * 2);
+      ctx.arc(ballFloorX, ballAirY, 2.2, 0, Math.PI * 2);
       ctx.fill();
 
       animId = requestAnimationFrame(render);
@@ -560,7 +590,7 @@ export function LiveMatchSimulator({
 
     animId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animId);
-  }, [simulation, activeTactic]);
+  }, [simulation, activeTactic, speedMultiplier]);
 
   return (
     <div className="relative mx-auto flex w-full max-w-5xl flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-5 shadow-2xl">
@@ -682,19 +712,17 @@ export function LiveMatchSimulator({
         {/* Current Active Highlight */}
         <div className="flex items-center gap-2 py-1 text-sm font-semibold text-slate-100">
           <span className="rounded bg-emerald-500/20 px-2 py-0.5 font-mono text-xs font-bold text-emerald-400">
-            {currentEvent ? `${currentEvent.minute}'` : `${currentMinute}'`}
+            {currentMinute}&apos;
           </span>
-          <p className="flex-1 text-slate-200">
-            {currentEvent?.description || "Kedua tim saling mengatur tempo dan membaca pergerakan lawan di tengah lapangan..."}
-          </p>
+          <p className="flex-1 text-slate-200">{currentCommentary}</p>
         </div>
 
         {/* Recent Events Scroll */}
         <div className="flex max-h-24 flex-col gap-1 overflow-y-auto pt-1 text-xs text-slate-400 scrollbar-thin">
-          {eventHistory.slice(1, 5).map((ev) => (
-            <div key={ev.id} className="flex items-center gap-2 opacity-75">
-              <span className="font-mono text-[10px] text-slate-500">{ev.minute}&apos;</span>
-              <span className="truncate">{ev.description}</span>
+          {commentaryHistory.slice(1, 6).map((item, idx) => (
+            <div key={idx} className="flex items-center gap-2 opacity-75">
+              <span className="font-mono text-[10px] text-slate-500">{item.minute}&apos;</span>
+              <span className="truncate">{item.text}</span>
             </div>
           ))}
         </div>

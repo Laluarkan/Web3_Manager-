@@ -9,6 +9,24 @@ export interface SimulationPlayer {
   baseOverall: number;
 }
 
+export interface AttackSequence {
+  id: string;
+  minute: number;
+  team: "HOME" | "AWAY";
+  buildupPlayer: string;
+  wingerPlayer: string;
+  finisherPlayer: string;
+  defenderPlayer: string;
+  gkPlayer: string;
+  outcome: "GOAL" | "SAVED" | "BLOCKED" | "WIDE" | "POST" | "TACKLED";
+  description: string;
+  isLoftedCross: boolean;
+  startCoord: { x: number; y: number };
+  wingerCoord: { x: number; y: number };
+  boxCoord: { x: number; y: number };
+  finishCoord: { x: number; y: number };
+}
+
 export interface MatchEvent {
   id: string;
   minute: number;
@@ -29,7 +47,7 @@ export interface MatchEvent {
   player: string;
   targetPlayer?: string;
   description: string;
-  ballCoord: { x: number; y: number }; // 0 - 100 percentage of pitch
+  ballCoord: { x: number; y: number };
 }
 
 export interface GeneratedMatchSimulation {
@@ -38,6 +56,7 @@ export interface GeneratedMatchSimulation {
   homePlayers: SimulationPlayer[];
   awayPlayers: SimulationPlayer[];
   events: MatchEvent[];
+  sequences: AttackSequence[];
   stats: {
     shots: { home: number; away: number };
     shotsOnTarget: { home: number; away: number };
@@ -86,7 +105,6 @@ export async function fetchDynamicOpponentSquad(
       }),
     ]);
 
-    // Acak pilihan agar tiap tanding pemainnya variatif
     const shuffle = <T>(arr: T[]): T[] => arr.slice().sort(() => Math.random() - 0.5);
     const selGK = shuffle(gks)[0];
     const selDF = shuffle(dfs);
@@ -175,6 +193,7 @@ export function buildMatchSimulation(
   }));
 
   const events: MatchEvent[] = [];
+  const sequences: AttackSequence[] = [];
 
   // Kick-off event
   events.push({
@@ -207,21 +226,10 @@ export function buildMatchSimulation(
     goalEvents.push({ minute: pickRandomMinute(4, 88), team: "AWAY" });
   }
 
-  const keyMinutes: number[] = [
-    5, 9, 14, 18, 22, 27, 33, 38, 42, 45, 48, 52, 57, 63, 68, 73, 78, 82, 86, 90
+  // Generate 18 realistic attack timeline minutes throughout the match
+  const attackMinutes: number[] = [
+    6, 11, 16, 21, 26, 31, 36, 41, 45, 49, 54, 59, 64, 69, 74, 79, 84, 90
   ];
-
-  const getAttackers = (team: "HOME" | "AWAY") => {
-    const list = team === "HOME" ? homePlayers : awayPlayers;
-    const forwards = list.filter((p) => p.position === "FW" || p.position === "MF");
-    return forwards.length ? forwards : list;
-  };
-
-  const getDefenders = (team: "HOME" | "AWAY") => {
-    const list = team === "HOME" ? homePlayers : awayPlayers;
-    const defs = list.filter((p) => p.position === "DF" || p.position === "GK");
-    return defs.length ? defs : list;
-  };
 
   let homeShots = myGoals;
   let awayShots = oppGoals;
@@ -234,7 +242,7 @@ export function buildMatchSimulation(
   let homeCorners = 0;
   let awayCorners = 0;
 
-  for (const m of keyMinutes) {
+  for (const m of attackMinutes) {
     if (m === 45) {
       events.push({
         id: `ev-${m}`,
@@ -260,122 +268,175 @@ export function buildMatchSimulation(
       continue;
     }
 
+    // Tentukan apakah serangan ini menghasilkan GOL atau TIDAK GOL (kemungkinan beragam)
     const matchingGoal = goalEvents.find((g) => Math.abs(g.minute - m) <= 2);
-    if (matchingGoal && !events.some((e) => e.type === "GOAL" && e.minute === matchingGoal.minute)) {
-      const isHome = matchingGoal.team === "HOME";
-      const scorerList = getAttackers(matchingGoal.team);
-      const scorer = scorerList[Math.floor(Math.random() * scorerList.length)];
-      const assisterList = scorerList.filter((p) => p.id !== scorer.id);
-      const assister = assisterList.length
-        ? assisterList[Math.floor(Math.random() * assisterList.length)]
-        : null;
+    const isGoal = Boolean(matchingGoal && !events.some((e) => e.type === "GOAL" && e.minute === matchingGoal.minute));
+
+    const isHome = isGoal
+      ? matchingGoal!.team === "HOME"
+      : Math.random() * 100 < possessionHome;
+
+    const attackingPlayers = isHome ? homePlayers : awayPlayers;
+    const defendingPlayers = isHome ? awayPlayers : homePlayers;
+
+    const buildup =
+      attackingPlayers.find((p) => p.slotCode === "CM" || p.slotCode === "LCM" || p.slotCode === "RCM") ||
+      attackingPlayers[5];
+    const winger =
+      attackingPlayers.find((p) => p.slotCode === "LW" || p.slotCode === "RW") ||
+      attackingPlayers[8];
+    const finisher =
+      attackingPlayers.find((p) => p.slotCode === "ST") ||
+      attackingPlayers[9];
+
+    const defender =
+      defendingPlayers.find((p) => p.slotCode === "LCB" || p.slotCode === "RCB") ||
+      defendingPlayers[2];
+    const gk =
+      defendingPlayers.find((p) => p.position === "GK") ||
+      defendingPlayers[0];
+
+    const attackingTeamName = isHome ? homeTeamName : awayTeamName;
+
+    // Koordinat dinamis penyerangan (Home menyerang ke Kanan x:95, Away ke Kiri x:5)
+    const startX = isHome ? 38 : 62;
+    const wingerX = isHome ? 74 : 26;
+    const wingerY = Math.random() < 0.5 ? 20 : 80;
+    const boxX = isHome ? 86 : 14;
+    const boxY = 48 + (Math.random() * 12 - 6);
+
+    if (isGoal) {
+      // HASIL GOL: Build-up sukses diakhiri tembakan jitu
+      const goalMin = matchingGoal!.minute;
+      const finishX = isHome ? 96 : 4;
+      const finishY = 46 + (Math.random() * 10 - 5);
+
+      sequences.push({
+        id: `seq-${goalMin}`,
+        minute: goalMin,
+        team: isHome ? "HOME" : "AWAY",
+        buildupPlayer: buildup.name,
+        wingerPlayer: winger.name,
+        finisherPlayer: finisher.name,
+        defenderPlayer: defender.name,
+        gkPlayer: gk.name,
+        outcome: "GOAL",
+        description: `GOOOOL! ${buildup.name} mengalirkan bola ke sayap, ${winger.name} melepas umpan silang akurat, dan ${finisher.name} menyambar bola masuk ke gawang!`,
+        isLoftedCross: true,
+        startCoord: { x: startX, y: 50 },
+        wingerCoord: { x: wingerX, y: wingerY },
+        boxCoord: { x: boxX, y: boxY },
+        finishCoord: { x: finishX, y: finishY },
+      });
 
       events.push({
-        id: `ev-goal-${matchingGoal.minute}`,
-        minute: matchingGoal.minute,
+        id: `ev-goal-${goalMin}`,
+        minute: goalMin,
         type: "GOAL",
-        team: matchingGoal.team,
-        player: scorer.name,
-        targetPlayer: assister ? assister.name : undefined,
-        description: isHome
-          ? `GOOOOL LUAR BIASA! ${scorer.name} melepaskan tembakan terarah yang merobek jala gawang lawan! (${homeTeamName})`
-          : `GOL! Lawan membalas lewat sontekan dingin ${scorer.name} ke sudut gawang! (${awayTeamName})`,
-        ballCoord: isHome ? { x: 95, y: 50 } : { x: 5, y: 50 },
-      });
-      continue;
-    }
-
-    const isHomeAction = Math.random() * 100 < possessionHome;
-    const activeTeam = isHomeAction ? "HOME" : "AWAY";
-    const attackTeam = getAttackers(activeTeam);
-    const defendingTeam = getDefenders(activeTeam === "HOME" ? "AWAY" : "HOME");
-    const p1 = attackTeam[Math.floor(Math.random() * attackTeam.length)];
-    const p2 = attackTeam[Math.floor(Math.random() * attackTeam.length)];
-    const defender = defendingTeam[Math.floor(Math.random() * defendingTeam.length)];
-
-    const roll = Math.random();
-    if (roll < 0.28) {
-      if (isHomeAction) {
-        homeShots++;
-        homeOnTarget++;
-      } else {
-        awayShots++;
-        awayOnTarget++;
-      }
-      events.push({
-        id: `ev-${m}`,
-        minute: m,
-        type: "SAVE",
-        team: activeTeam,
-        player: p1.name,
-        targetPlayer: defender.name,
-        description: `Peluang emas! ${p1.name} melepaskan tembakan voli keras, namun kiper berhasil menepis bola!`,
-        ballCoord: isHomeAction ? { x: 88, y: 46 } : { x: 12, y: 54 },
-      });
-    } else if (roll < 0.48) {
-      if (isHomeAction) homeCorners++;
-      else awayCorners++;
-      events.push({
-        id: `ev-${m}`,
-        minute: m,
-        type: "CORNER",
-        team: activeTeam,
-        player: p1.name,
-        description: `Tendangan sudut untuk ${isHomeAction ? homeTeamName : awayTeamName}. ${p1.name} bersiap mengayunkan umpan lambung ke kotak penalti.`,
-        ballCoord: isHomeAction ? { x: 98, y: 5 } : { x: 2, y: 95 },
-      });
-    } else if (roll < 0.68) {
-      if (isHomeAction) {
-        awayFouls++;
-        if (Math.random() < 0.4) awayYellows++;
-      } else {
-        homeFouls++;
-        if (Math.random() < 0.4) homeYellows++;
-      }
-      events.push({
-        id: `ev-${m}`,
-        minute: m,
-        type: "FOUL",
-        team: isHomeAction ? "AWAY" : "HOME",
-        player: defender.name,
-        targetPlayer: p1.name,
-        description: `Pelanggaran! ${defender.name} menekel ${p1.name} saat mencoba menerobos barisan pertahanan.`,
-        ballCoord: isHomeAction ? { x: 65, y: 40 } : { x: 35, y: 60 },
+        team: isHome ? "HOME" : "AWAY",
+        player: finisher.name,
+        targetPlayer: winger.name,
+        description: `GOOOOL! ${finisher.name} mencetak gol brilian untuk ${attackingTeamName}!`,
+        ballCoord: { x: finishX, y: finishY },
       });
     } else {
+      // HASIL BUKAN GOL: Ditentukan secara probabilistik (Penyelamatan Kiper, Blok Bek, Tembakan Meleset, Kena Tiang, Tekel)
+      const roll = Math.random();
+      let outcome: AttackSequence["outcome"] = "SAVED";
+      let desc = "";
+      let finishX = isHome ? 92 : 8;
+      let finishY = 50;
+
+      if (isHome) homeShots++;
+      else awayShots++;
+
+      if (roll < 0.35) {
+        // Outcome 1: Tembakan tepat sasaran ditepis kiper (SAVED)
+        outcome = "SAVED";
+        if (isHome) homeOnTarget++;
+        else awayOnTarget++;
+        finishX = isHome ? 92 : 8;
+        finishY = 48 + (Math.random() * 8 - 4);
+        desc = `Penyelamatan hebat! ${finisher.name} menyambut umpan silang dengan sepakan keras, namun ${gk.name} sigap menepis bola!`;
+      } else if (roll < 0.60) {
+        // Outcome 2: Dicegah dan diblok oleh bek (BLOCKED)
+        outcome = "BLOCKED";
+        finishX = isHome ? 84 : 16;
+        finishY = 50 + (Math.random() * 10 - 5);
+        desc = `Peluang diblok! ${finisher.name} siap menembak, tetapi bek tangguh ${defender.name} meluncur melakukan blok krusial!`;
+      } else if (roll < 0.82) {
+        // Outcome 3: Tembakan meleset tipis ke samping / melambung (WIDE)
+        outcome = "WIDE";
+        finishX = isHome ? 98 : 2;
+        finishY = Math.random() < 0.5 ? 24 : 76;
+        desc = `Tembakan melenceng! Umpan terobosan matang disambar ${finisher.name}, namun bola melenceng tipis dari tiang gawang.`;
+      } else if (roll < 0.92) {
+        // Outcome 4: Membentur tiang/mistar gawang! (POST)
+        outcome = "POST";
+        if (isHome) homeOnTarget++;
+        else awayOnTarget++;
+        finishX = isHome ? 94 : 6;
+        finishY = Math.random() < 0.5 ? 36 : 64;
+        desc = `MENGHANTAM TIANG GAWANG! Tendangan geledek ${finisher.name} membentur mistar dengan keras!`;
+      } else {
+        // Outcome 5: Tekel sukses dihentikan bek sebelum menembak (TACKLED)
+        outcome = "TACKLED";
+        finishX = isHome ? 78 : 22;
+        finishY = wingerY;
+        desc = `Serangan terhenti! Tekel bersih dari ${defender.name} mematahkan tusukan berbahaya ${winger.name}.`;
+      }
+
+      sequences.push({
+        id: `seq-${m}`,
+        minute: m,
+        team: isHome ? "HOME" : "AWAY",
+        buildupPlayer: buildup.name,
+        wingerPlayer: winger.name,
+        finisherPlayer: finisher.name,
+        defenderPlayer: defender.name,
+        gkPlayer: gk.name,
+        outcome,
+        description: desc,
+        isLoftedCross: true,
+        startCoord: { x: startX, y: 50 },
+        wingerCoord: { x: wingerX, y: wingerY },
+        boxCoord: { x: boxX, y: boxY },
+        finishCoord: { x: finishX, y: finishY },
+      });
+
       events.push({
         id: `ev-${m}`,
         minute: m,
-        type: "PASS",
-        team: activeTeam,
-        player: p1.name,
-        targetPlayer: p2.name,
-        description: `${p1.name} mengatur tempo serangan, mengoper bola terobosan kepada ${p2.name}.`,
-        ballCoord: isHomeAction ? { x: 62, y: 50 } : { x: 38, y: 50 },
+        type: outcome === "SAVED" ? "SAVE" : "CHANCE",
+        team: isHome ? "HOME" : "AWAY",
+        player: finisher.name,
+        targetPlayer: defender.name,
+        description: desc,
+        ballCoord: { x: finishX, y: finishY },
       });
     }
   }
 
+  // Ensure all goals are captured in events list
   for (const g of goalEvents) {
     if (!events.some((e) => e.type === "GOAL" && e.minute === g.minute)) {
       const isHome = g.team === "HOME";
-      const scorerList = getAttackers(g.team);
-      const scorer = scorerList[Math.floor(Math.random() * scorerList.length)];
+      const scorerList = isHome ? homePlayers : awayPlayers;
+      const scorer = scorerList.find((p) => p.position === "FW") || scorerList[0];
       events.push({
         id: `ev-goal-${g.minute}`,
         minute: g.minute,
         type: "GOAL",
         team: g.team,
         player: scorer.name,
-        description: isHome
-          ? `GOOOOL! Sontekan tajam ${scorer.name} menjebol gawang lawan! (${homeTeamName})`
-          : `GOL! Serangan balik cepat lawan diselesaikan oleh ${scorer.name}. (${awayTeamName})`,
+        description: `GOOOOL! ${scorer.name} mencetak gol untuk ${isHome ? homeTeamName : awayTeamName}!`,
         ballCoord: isHome ? { x: 96, y: 50 } : { x: 4, y: 50 },
       });
     }
   }
 
   events.sort((a, b) => a.minute - b.minute);
+  sequences.sort((a, b) => a.minute - b.minute);
 
   return {
     homeTeamName,
@@ -383,6 +444,7 @@ export function buildMatchSimulation(
     homePlayers,
     awayPlayers,
     events,
+    sequences,
     stats: {
       shots: { home: Math.max(homeShots, myGoals + 3), away: Math.max(awayShots, oppGoals + 2) },
       shotsOnTarget: { home: Math.max(homeOnTarget, myGoals + 2), away: Math.max(awayOnTarget, oppGoals + 1) },
