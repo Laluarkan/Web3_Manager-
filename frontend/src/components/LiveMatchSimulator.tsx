@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Play,
   Pause,
@@ -11,9 +11,7 @@ import {
   Activity,
 } from "lucide-react";
 import { FootballPitch } from "./match/FootballPitch";
-import { PlayerAgent } from "@/engine/ai/PlayerBehavior";
-import { BallPhysics } from "@/engine/physics/BallPhysics";
-import { MatchCoordinator } from "@/engine/ai/TacticalAI";
+import { MatchEngine } from "@/engine/ai/TacticalAI";
 
 export interface SimulationPlayer {
   id: number;
@@ -88,35 +86,6 @@ interface LiveMatchSimulatorProps {
   onFinish: () => void;
 }
 
-// Koordinat taktis formasi 4-3-3
-const FORMATION_HOME: Record<string, { x: number; y: number }> = {
-  GK: { x: 7, y: 50 },
-  LB: { x: 24, y: 18 },
-  LCB: { x: 19, y: 38 },
-  RCB: { x: 19, y: 62 },
-  RB: { x: 24, y: 82 },
-  LCM: { x: 42, y: 32 },
-  CM: { x: 38, y: 50 },
-  RCM: { x: 42, y: 68 },
-  LW: { x: 68, y: 22 },
-  ST: { x: 75, y: 50 },
-  RW: { x: 68, y: 78 },
-};
-
-const FORMATION_AWAY: Record<string, { x: number; y: number }> = {
-  GK: { x: 93, y: 50 },
-  RB: { x: 76, y: 18 },
-  RCB: { x: 81, y: 38 },
-  LCB: { x: 81, y: 62 },
-  LB: { x: 76, y: 82 },
-  RCM: { x: 58, y: 32 },
-  CM: { x: 62, y: 50 },
-  LCM: { x: 58, y: 68 },
-  RW: { x: 32, y: 22 },
-  ST: { x: 25, y: 50 },
-  LW: { x: 32, y: 78 },
-};
-
 export function LiveMatchSimulator({
   simulation,
   earnedPoints,
@@ -142,107 +111,37 @@ export function LiveMatchSimulator({
   } | null>(null);
   const [isMatchFinished, setIsMatchFinished] = useState(false);
 
-  // Instansiasi Engine Fisika & AI Pertandingan
-  const ballRef = useRef<BallPhysics>(new BallPhysics(50, 50));
-  const agentsRef = useRef<PlayerAgent[]>([]);
-  const coordinatorRef = useRef<MatchCoordinator>(new MatchCoordinator());
+  // Engine simulasi (22 agen, bola, AI taktik) dibuat ulang untuk tiap simulasi
+  const engine = useMemo(() => new MatchEngine(simulation), [simulation]);
 
-  // Inisialisasi 22 Pemain sebagai Autonomous Agents
   useEffect(() => {
-    const list: PlayerAgent[] = [];
+    engine.setTactic(activeTactic);
+  }, [engine, activeTactic]);
 
-    // Home Team (11 Pemain)
-    simulation.homePlayers.forEach((p, idx) => {
-      const anchor = FORMATION_HOME[p.slotCode] || { x: 25, y: 50 };
-      list.push(
-        new PlayerAgent({
-          id: p.id,
-          name: p.name,
-          position: p.position,
-          slotCode: p.slotCode,
-          number: p.number || idx + 1,
-          team: "HOME",
-          baseOverall: p.baseOverall || 75,
-          anchor,
-        })
-      );
-    });
-
-    // Away Team (11 Pemain)
-    simulation.awayPlayers.forEach((p, idx) => {
-      const anchor = FORMATION_AWAY[p.slotCode] || { x: 75, y: 50 };
-      list.push(
-        new PlayerAgent({
-          id: p.id,
-          name: p.name,
-          position: p.position,
-          slotCode: p.slotCode,
-          number: p.number || idx + 1,
-          team: "AWAY",
-          baseOverall: p.baseOverall || 75,
-          anchor,
-        })
-      );
-    });
-
-    agentsRef.current = list;
-
-    // Pasangkan bola di kaki striker awal
-    const homeStriker = list.find((a) => a.team === "HOME" && a.slotCode === "ST") || list[9];
-    if (homeStriker) {
-      ballRef.current.attachToCarrier(
-        homeStriker.id,
-        homeStriker.name,
-        homeStriker.position,
-        homeStriker.facingAngle
-      );
-    }
-  }, [simulation]);
-
-  // Update Taktik Aktif ke Koordinator AI
+  // Game loop berbasis delta waktu (halus di semua refresh rate)
   useEffect(() => {
-    coordinatorRef.current.setTactic(activeTactic);
-  }, [activeTactic]);
-
-  // Game Loop Fisika 60 FPS
-  useEffect(() => {
-    let animId: number;
-    let lastTime = performance.now();
-
-    const loop = (currentTime: number) => {
-      const dt = Math.min((currentTime - lastTime) / 1000, 0.1);
-      lastTime = currentTime;
-
-      if (!isPaused && !isMatchFinished) {
-        coordinatorRef.current.update(
-          dt,
-          speedMultiplier,
-          agentsRef.current,
-          ballRef.current,
-          (goalSeq) => {
-            // Callback ketika gol terjadi dari attack sequence
-            if (goalSeq.team === "HOME") {
-              setHomeScore((s) => s + 1);
-            } else {
-              setAwayScore((s) => s + 1);
-            }
-            setGoalCelebration({
-              player: goalSeq.finisherPlayer,
-              team: goalSeq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
-              minute: goalSeq.minute,
-            });
-            setTimeout(() => setGoalCelebration(null), 3600);
-          }
-        );
-      }
-
-      animId = requestAnimationFrame(loop);
+    engine.onGoal = (goalSeq) => {
+      if (goalSeq.team === "HOME") setHomeScore((s) => s + 1);
+      else setAwayScore((s) => s + 1);
+      setGoalCelebration({
+        player: goalSeq.finisherPlayer,
+        team: goalSeq.team === "HOME" ? simulation.homeTeamName : simulation.awayTeamName,
+        minute: goalSeq.minute,
+      });
+      setTimeout(() => setGoalCelebration(null), 3600);
     };
 
+    let animId: number;
+    let last = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      if (!isPaused && !isMatchFinished) engine.advance(dt * speedMultiplier);
+      animId = requestAnimationFrame(loop);
+    };
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [isPaused, isMatchFinished, speedMultiplier, simulation]);
-
+  }, [engine, isPaused, isMatchFinished, speedMultiplier, simulation]);
   // Timeline Pertandingan (Durasi ~10 menit waktu nyata pada kecepatan 1x)
   const minuteRef = useRef(1);
   useEffect(() => {
@@ -260,7 +159,7 @@ export function LiveMatchSimulator({
       // Cek apakah menit ini memiliki skenario penyerangan terstruktur
       const seq = simulation.sequences?.find((s) => s.minute === m);
       if (seq) {
-        coordinatorRef.current.triggerSequence(seq);
+        engine.queueSequence(seq);
         setCurrentCommentary(seq.description);
         setCommentaryHistory((prev) => [{ minute: m, text: seq.description }, ...prev].slice(0, 15));
       } else {
@@ -279,7 +178,7 @@ export function LiveMatchSimulator({
     }, intervalTimeMs);
 
     return () => clearInterval(timer);
-  }, [isPaused, isMatchFinished, speedMultiplier, simulation]);
+  }, [engine, isPaused, isMatchFinished, speedMultiplier, simulation]);
 
   const handleSkipToEnd = () => {
     let h = 0;
@@ -378,9 +277,7 @@ export function LiveMatchSimulator({
 
       {/* 2. DYNAMIC FOOTBALL PITCH (STEERING BEHAVIORS & 3D BALL) */}
       <div className="relative">
-        <FootballPitch
-          agents={agentsRef.current}
-          ball={ballRef.current}
+        <FootballPitch engine={engine}
           homeTeamName={simulation.homeTeamName}
           awayTeamName={simulation.awayTeamName}
         />

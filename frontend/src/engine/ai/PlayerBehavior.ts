@@ -1,241 +1,137 @@
 import { Vector2D } from "../Vector2D";
-import { ISteerable, SteeringBehaviors } from "../movement/Steering";
-import { BallPhysics } from "../physics/BallPhysics";
 
-export type PlayerAction =
-  | "IDLE"
-  | "PRESSING"
-  | "SUPPORTING"
-  | "MAKING_RUN"
-  | "BLOCKING"
-  | "DIVING"
-  | "DRIBBLE";
+export type Team = "HOME" | "AWAY";
+export type Role = "GK" | "DF" | "MF" | "FW";
 
-export interface PlayerInitData {
+export interface PlayerInit {
   id: number;
   name: string;
-  position: "GK" | "DF" | "MF" | "FW";
+  position: Role;
   slotCode: string;
   number: number;
-  team: "HOME" | "AWAY";
+  team: Team;
   baseOverall: number;
-  anchor: { x: number; y: number };
+  anchor: { x: number; y: number }; // meter
 }
 
-export class PlayerAgent implements ISteerable {
-  public id: number;
-  public name: string;
-  public positionRole: "GK" | "DF" | "MF" | "FW";
-  public slotCode: string;
-  public number: number;
-  public team: "HOME" | "AWAY";
-  public baseOverall: number;
+const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
-  public position: Vector2D;
-  public velocity: Vector2D;
-  public facingAngle: number;
-  public maxSpeed: number;
-  public maxForce: number;
-  public anchorPos: Vector2D;
+/**
+ * Agen pemain. Semua satuan dalam meter & detik, sehingga gerakan
+ * konsisten di semua refresh rate. Halus karena:
+ *  - target dihaluskan (low-pass), tidak pernah melompat
+ *  - kecepatan dibatasi percepatan (tidak ada perubahan arah instan)
+ *  - arah hadap berputar dengan batas laju putar
+ */
+export class PlayerAgent {
+  id: number;
+  name: string;
+  positionRole: Role;
+  slotCode: string;
+  number: number;
+  team: Team;
+  anchor: Vector2D;
 
-  public wanderAngle: number;
-  public actionState: PlayerAction = "IDLE";
-  public slideTackleTimer: number = 0; // Efek visual tekel jika ada
+  position: Vector2D;
+  velocity = new Vector2D(0, 0);
+  facingAngle: number;
 
-  constructor(init: PlayerInitData) {
+  desired: Vector2D; // target mentah dari AI taktik
+  target: Vector2D; // target yang sudah dihaluskan
+  urgencyOverride?: number;
+
+  // Kepribadian & atribut individu
+  topSpeed: number;
+  accel: number;
+  phase: number;
+  discipline: number; // 0.6-1: seberapa disiplin menjaga posisi
+  aggression: number; // 0-1: seberapa agresif merebut bola
+
+  constructor(init: PlayerInit) {
     this.id = init.id;
     this.name = init.name;
     this.positionRole = init.position;
     this.slotCode = init.slotCode;
     this.number = init.number;
     this.team = init.team;
-    this.baseOverall = init.baseOverall;
+    this.anchor = new Vector2D(init.anchor.x, init.anchor.y);
+    this.position = this.anchor.clone();
+    this.desired = this.anchor.clone();
+    this.target = this.anchor.clone();
+    this.facingAngle = init.team === "HOME" ? 0 : Math.PI;
 
-    this.position = new Vector2D(init.anchor.x, init.anchor.y);
-    this.velocity = new Vector2D(0, 0);
-    this.facingAngle = init.team === "HOME" ? 0 : Math.PI; // Home hadap kanan, Away hadap kiri
-    this.anchorPos = new Vector2D(init.anchor.x, init.anchor.y);
-
-    // Kecepatan disesuaikan dengan rating overall (0.85 - 1.25)
-    const ratingFactor = (init.baseOverall - 60) / 40;
-    this.maxSpeed = 0.88 + Math.max(0, Math.min(0.35, ratingFactor * 0.35));
-    this.maxForce = 0.14;
-    this.wanderAngle = Math.random() * Math.PI * 2;
+    const rating = clamp((init.baseOverall - 55) / 45, 0, 1);
+    this.topSpeed = (init.position === "GK" ? 7 : 10 + rating * 3) * (0.95 + Math.random() * 0.1);
+    this.accel = 16 + rating * 6;
+    this.phase = Math.random() * Math.PI * 2;
+    this.discipline = 0.6 + Math.random() * 0.4;
+    this.aggression = Math.random();
   }
 
-  /**
-   * Menentukan posisi taktis yang diinginkan (Desire Target) berdasarkan:
-   * 1. Peran posisi (GK, DF, MF, FW)
-   * 2. Kepemilikan bola tim (Menyerang atau Bertahan)
-   * 3. Taktik manajer (Defensive, Balanced, Attacking)
-   */
-  public computeTacticalTarget(
-    ball: BallPhysics,
-    isTeamInPossession: boolean,
-    teamTactic: "DEFENSIVE" | "BALANCED" | "ATTACKING",
-    isSequenceActor: boolean,
-    sequenceTargetPos?: Vector2D
-  ): Vector2D {
-    // Jika pemain adalah aktor utama dalam skenario serangan yang sedang berjalan
-    if (isSequenceActor && sequenceTargetPos) {
-      this.actionState = "MAKING_RUN";
-      return sequenceTargetPos;
-    }
-
-    const isHome = this.team === "HOME";
-    const attackDir = isHome ? 1 : -1;
-    const target = this.anchorPos.clone();
-
-    // Penyesuaian garis taktik manajer
-    const tacticOffset =
-      teamTactic === "ATTACKING" ? 6 * attackDir : teamTactic === "DEFENSIVE" ? -6 * attackDir : 0;
-    target.x += tacticOffset;
-
-    // 1. GOALKEEPER (Kiper)
-    if (this.positionRole === "GK") {
-      const goalCenterX = isHome ? 6.5 : 93.5;
-      const goalCenterY = 50;
-
-      // Kiper selalu membagi sudut tembakan antara bola dan titik tengah gawang
-      const toBall = Vector2D.sub(ball.position, new Vector2D(goalCenterX, goalCenterY));
-      const clampDist = Math.min(toBall.mag() * 0.12, 3.2); // Kiper tidak boleh keluar terlalu jauh
-      toBall.normalize().mult(clampDist);
-
-      target.x = goalCenterX + toBall.x;
-      target.y = 50 + (ball.position.y - 50) * 0.32; // Geser vertikal menutup tiang dekat
-      this.actionState = "IDLE";
-      return target;
-    }
-
-    // 2. DEFENDER (Lini Belakang)
-    if (this.positionRole === "DF") {
-      if (isTeamInPossession) {
-        // Saat menyerang, garis bek naik mendekati garis tengah untuk memadatkan tim (High Line)
-        const forwardPush = 14 * attackDir;
-        target.x += forwardPush;
-        // Fullback ikut overlap melebar
-        if (this.slotCode === "LB" || this.slotCode === "RB") {
-          target.x += 8 * attackDir;
-        }
-        this.actionState = "SUPPORTING";
-      } else {
-        // Saat bertahan, rapikan barisan & lakukan pressing jika bola dekat (< 16 unit)
-        const distToBall = this.position.dist(ball.position);
-        if (distToBall < 16) {
-          this.actionState = "PRESSING";
-          // Bergerak memotong jalur bola
-          target.x = ball.position.x - 3 * attackDir;
-          target.y = ball.position.y;
-        } else {
-          this.actionState = "BLOCKING";
-          // Ikuti pergeseran bola secara kolektif
-          target.x = this.anchorPos.x + (ball.position.x - 50) * 0.18;
-          target.y = this.anchorPos.y + (ball.position.y - this.anchorPos.y) * 0.28;
-        }
-      }
-      return target;
-    }
-
-    // 3. MIDFIELDER (Gelandang)
-    if (this.positionRole === "MF") {
-      if (isTeamInPossession) {
-        // Gelandang aktif mencari ruang passing triangle
-        const shiftX = (ball.position.x - 50) * 0.35 + 8 * attackDir;
-        const shiftY = (ball.position.y - this.anchorPos.y) * 0.4;
-        target.x += shiftX;
-        target.y += shiftY;
-        this.actionState = "SUPPORTING";
-      } else {
-        // Saat kehilangan bola, lakukan pressing atau tutup ruang tengah
-        const distToBall = this.position.dist(ball.position);
-        if (distToBall < 18) {
-          this.actionState = "PRESSING";
-          target.x = ball.position.x;
-          target.y = ball.position.y;
-        } else {
-          target.x = this.anchorPos.x + (ball.position.x - 50) * 0.25;
-          target.y = this.anchorPos.y + (ball.position.y - 50) * 0.25;
-          this.actionState = "IDLE";
-        }
-      }
-      return target;
-    }
-
-    // 4. FORWARD (Penyerang / Winger / Striker)
-    if (this.positionRole === "FW") {
-      if (isTeamInPossession) {
-        // Menusuk ke celah pertahanan lawan (Off-the-ball run)
-        const forwardRun = (isHome ? Math.min(88, this.anchorPos.x + 14) : Math.max(12, this.anchorPos.x - 14));
-        target.x = forwardRun;
-        // Winger melebar, striker di tengah
-        if (this.slotCode === "ST") {
-          target.y = 50 + (ball.position.y - 50) * 0.25;
-        } else {
-          target.y = this.anchorPos.y + Math.sin(this.wanderAngle) * 8;
-        }
-        this.actionState = "MAKING_RUN";
-      } else {
-        // Pressing dari depan atau menunggu transisi counter attack
-        target.x = this.anchorPos.x + (ball.position.x - 50) * 0.15;
-        target.y = this.anchorPos.y;
-        this.actionState = "IDLE";
-      }
-      return target;
-    }
-
-    return target;
+  setDesired(x: number, y: number, urgency?: number) {
+    this.desired.set(x, y);
+    this.urgencyOverride = urgency;
   }
 
-  /**
-   * Update pergerakan fisik setiap frame dengan kombinasi Steering Behaviors
-   */
-  public updatePhysics(
-    desiredTarget: Vector2D,
-    allAgents: PlayerAgent[],
-    dt: number,
-    speedMultiplier: number = 1.0
-  ) {
-    if (this.slideTackleTimer > 0) {
-      this.slideTackleTimer -= dt * speedMultiplier;
+  update(dt: number, time: number, others: PlayerAgent[]) {
+    // 1. Haluskan target (exponential smoothing)
+    const k = 1 - Math.exp(-4 * dt);
+    this.target.x += (this.desired.x - this.target.x) * k;
+    this.target.y += (this.desired.y - this.target.y) * k;
+
+    // 2. Gerak organik kecil saat santai (bukan gaya acak per frame)
+    const dist0 = this.target.dist(this.position);
+    const urgency = this.urgencyOverride ?? clamp(0.3 + dist0 / 14, 0.3, 0.85);
+    const roam = (1 - urgency) * (this.positionRole === "GK" ? 0.3 : 1) * this.discipline;
+    const gx = this.target.x + Math.sin(time * 0.55 + this.phase) * 1.4 * roam;
+    const gy = this.target.y + Math.cos(time * 0.43 + this.phase * 1.7) * 1.2 * roam;
+
+    // 3. Arrive: melambat mulus mendekati tujuan
+    const dx = gx - this.position.x;
+    const dy = gy - this.position.y;
+    const dist = Math.hypot(dx, dy);
+    const cap = this.topSpeed * (0.35 + 0.65 * urgency);
+    const speed = Math.min(cap, dist * 1.8);
+    let wvx = dist > 0.05 ? (dx / dist) * speed : 0;
+    let wvy = dist > 0.05 ? (dy / dist) * speed : 0;
+
+    // 4. Separation: tidak bertumpuk
+    for (const o of others) {
+      if (o === this) continue;
+      const ox = this.position.x - o.position.x;
+      const oy = this.position.y - o.position.y;
+      const d = Math.hypot(ox, oy);
+      if (d < 3 && d > 0.001) {
+        const w = (3 - d) / 3;
+        wvx += (ox / d) * w * 4;
+        wvy += (oy / d) * w * 4;
+      }
     }
 
-    // 1. Gaya Menuju Target (Arrive - melambat halus saat tiba di titik tujuan)
-    const arriveForce = SteeringBehaviors.arrive(this, desiredTarget, 7.0);
+    // 5. Percepatan terbatas
+    let ax = wvx - this.velocity.x;
+    let ay = wvy - this.velocity.y;
+    const am = Math.hypot(ax, ay);
+    const maxDv = this.accel * dt;
+    if (am > maxDv) {
+      ax = (ax / am) * maxDv;
+      ay = (ay / am) * maxDv;
+    }
+    this.velocity.x += ax;
+    this.velocity.y += ay;
+    this.position.x += this.velocity.x * dt;
+    this.position.y += this.velocity.y * dt;
+    this.position.x = clamp(this.position.x, 1, 104);
+    this.position.y = clamp(this.position.y, 1, 67);
 
-    // 2. Gaya Pemisahan (Separation - tidak saling tabrak / bertumpuk)
-    const separationForce = SteeringBehaviors.separation(this, allAgents, 4.8);
-
-    // 3. Gaya Wander Organik (mencegah pemain diam mematung)
-    const { force: wanderForce, newAngle } = SteeringBehaviors.wander(this, this.wanderAngle, 1.5, 3.0);
-    this.wanderAngle = newAngle;
-
-    // Total Steering Force
-    const totalForce = new Vector2D(0, 0);
-    totalForce.add(arriveForce);
-    totalForce.add(separationForce);
-    totalForce.add(wanderForce);
-
-    // Integrasi percepatan & kecepatan
-    totalForce.truncate(this.maxForce);
-    this.velocity.add(totalForce);
-    this.velocity.truncate(this.maxSpeed);
-
-    // Update posisi
-    const effectiveMove = Vector2D.mult(this.velocity, speedMultiplier);
-    this.position.add(effectiveMove);
-
-    // Update sudut hadap (Interpolasi halus menghadap arah lari)
-    if (this.velocity.magSq() > 0.01) {
-      const targetAngle = this.velocity.heading();
-      // Interpolasi angular slerp sederhana
-      let diff = targetAngle - this.facingAngle;
+    // 6. Arah hadap berputar halus
+    if (Math.hypot(this.velocity.x, this.velocity.y) > 0.8) {
+      const ta = Math.atan2(this.velocity.y, this.velocity.x);
+      let diff = ta - this.facingAngle;
       while (diff < -Math.PI) diff += Math.PI * 2;
       while (diff > Math.PI) diff -= Math.PI * 2;
-      this.facingAngle += diff * 0.15;
+      const maxTurn = 7 * dt;
+      this.facingAngle += clamp(diff, -maxTurn, maxTurn);
     }
-
-    // Batasan lapangan (2% - 98%)
-    this.position.x = Math.max(3, Math.min(97, this.position.x));
-    this.position.y = Math.max(4, Math.min(96, this.position.y));
   }
 }

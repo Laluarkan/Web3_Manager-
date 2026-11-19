@@ -1,19 +1,17 @@
 "use client";
 
 import React, { useEffect, useRef } from "react";
-import { PlayerAgent } from "@/engine/ai/PlayerBehavior";
-import { BallPhysics } from "@/engine/physics/BallPhysics";
+import { MatchEngine, PITCH_W, PITCH_H } from "@/engine/ai/TacticalAI";
+
 
 interface FootballPitchProps {
-  agents: PlayerAgent[];
-  ball: BallPhysics;
+  engine: MatchEngine;
   homeTeamName: string;
   awayTeamName: string;
 }
 
 export const FootballPitch: React.FC<FootballPitchProps> = ({
-  agents,
-  ball,
+  engine,
   homeTeamName,
   awayTeamName,
 }) => {
@@ -63,7 +61,7 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
       ctx.stroke();
 
       ctx.beginPath();
-      ctx.arc(midX, midY, height * 0.16, 0, Math.PI * 2);
+      ctx.arc(midX, midY, pitchW * 0.0871, 0, Math.PI * 2);
       ctx.stroke();
 
       // Titik Kick-off
@@ -88,7 +86,7 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
 
       // Busur Penalti Kiri
       ctx.beginPath();
-      ctx.arc(pad + boxW * 0.72, midY, height * 0.11, -0.7, 0.7);
+      ctx.arc(pad + boxW * 0.72, midY, pitchW * 0.0871, -0.7, 0.7);
       ctx.stroke();
 
       // Jaring Gawang Kiri
@@ -107,7 +105,7 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
 
       // Busur Penalti Kanan
       ctx.beginPath();
-      ctx.arc(width - pad - boxW * 0.72, midY, height * 0.11, Math.PI - 0.7, Math.PI + 0.7);
+      ctx.arc(width - pad - boxW * 0.72, midY, pitchW * 0.0871, Math.PI - 0.7, Math.PI + 0.7);
       ctx.stroke();
 
       // Jaring Gawang Kanan
@@ -130,22 +128,12 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
       ctx.stroke();
 
       // 3. RENDER 22 PEMAIN DENGAN HEADING POINTER & AURA
-      agents.forEach((agent) => {
-        const px = pad + (agent.position.x / 100) * pitchW;
-        const py = pad + (agent.position.y / 100) * pitchH;
+      const ball = engine.ball;
+      engine.agents.forEach((agent) => {
+        const px = pad + (agent.position.x / PITCH_W) * pitchW;
+        const py = pad + (agent.position.y / PITCH_H) * pitchH;
         const isHome = agent.team === "HOME";
-        const isCarrier = ball.carrierId === agent.id;
-
-        // Efek Luncuran Tekel (Slide Tackle Dirt Trace)
-        if (agent.slideTackleTimer > 0) {
-          ctx.strokeStyle = "rgba(234, 179, 8, 0.4)";
-          ctx.lineWidth = 4;
-          ctx.beginPath();
-          ctx.moveTo(px - Math.cos(agent.facingAngle) * 16, py - Math.sin(agent.facingAngle) * 16);
-          ctx.lineTo(px, py);
-          ctx.stroke();
-        }
-
+        const isCarrier = ball.carrier === agent;
         // Aura bercahaya untuk pembawa bola aktif
         if (isCarrier) {
           ctx.strokeStyle = isHome ? "rgba(52, 211, 153, 0.85)" : "rgba(251, 113, 133, 0.85)";
@@ -203,19 +191,19 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
       });
 
       // 4. RENDER BOLA DENGAN ELEVASI 3D (Z-HEIGHT) & BAYANGAN REALISTIS
-      const ballFloorX = pad + (ball.position.x / 100) * pitchW;
-      const ballFloorY = pad + (ball.position.y / 100) * pitchH;
+      const ballFloorX = pad + (ball.position.x / PITCH_W) * pitchW;
+      const ballFloorY = pad + (ball.position.y / PITCH_H) * pitchH;
 
       // Bayangan Bola di Rumput (Membesar & Menipis saat Bola Melambung Tinggi)
-      const shadowScale = 1 + ball.z / 32;
-      const shadowAlpha = Math.max(0.1, 0.42 - ball.z / 90);
+      const shadowScale = 1 + ball.z / 4;
+      const shadowAlpha = Math.max(0.1, 0.42 - ball.z / 12);
       ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
       ctx.beginPath();
       ctx.ellipse(ballFloorX + 2, ballFloorY + 3, 5.5 * shadowScale, 3.2 * shadowScale, 0, 0, Math.PI * 2);
       ctx.fill();
 
       // Posisi Udara Bola: (x, y - z)
-      const ballAirY = ballFloorY - ball.z;
+      const ballAirY = ballFloorY - ball.z * 7;
 
       // Bola Putih
       ctx.fillStyle = "#ffffff";
@@ -237,14 +225,14 @@ export const FootballPitch: React.FC<FootballPitchProps> = ({
 
     animationId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationId);
-  }, [agents, ball, homeTeamName, awayTeamName]);
+  }, [engine, homeTeamName, awayTeamName]);
 
   return (
     <div className="relative w-full overflow-hidden rounded-xl border border-slate-800/90 shadow-2xl">
       <canvas
         ref={canvasRef}
         width={960}
-        height={560}
+        height={638}
         className="w-full h-auto block select-none bg-slate-950"
       />
     </div>
