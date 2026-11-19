@@ -23,10 +23,16 @@ export const env = {
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
 
   // Blockchain config
-  rpcUrl: process.env.RPC_URL || "http://127.0.0.1:8545",
-  chainId: Number(process.env.CHAIN_ID || 31337),
+  rpcUrl:
+    process.env.RPC_URL ||
+    (isProd
+      ? "https://ethereum-sepolia-rpc.publicnode.com"
+      : "http://127.0.0.1:8545"),
+  chainId: Number(process.env.CHAIN_ID || (isProd ? 11155111 : 31337)),
   backendSignerPrivateKey:
-    process.env.BACKEND_SIGNER_PRIVATE_KEY || (isProd ? "" : HARDHAT_LOCAL_DEV_KEY),
+    process.env.BACKEND_SIGNER_PRIVATE_KEY ||
+    process.env.VOUCHER_SIGNER_PRIVATE_KEY ||
+    (isProd ? "" : HARDHAT_LOCAL_DEV_KEY),
   kansTokenAddress:
     process.env.KANS_TOKEN_ADDRESS || "0x602fb1884765b3bAd6a8365046Dda7a93176A9fb",
   cardNftAddress:

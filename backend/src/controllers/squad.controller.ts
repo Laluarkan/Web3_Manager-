@@ -190,7 +190,12 @@ export async function confirmStarterOnChain(req: AuthRequest, res: Response) {
 export async function syncWalletCards(req: AuthRequest, res: Response) {
   try {
     const userId = req.user!.id;
-    const walletAddress = req.user!.walletAddress!;
+    const walletAddress = req.user?.walletAddress;
+
+    if (!walletAddress) {
+      res.status(400).json({ error: "Hubungkan dompet MetaMask Anda terlebih dahulu." });
+      return;
+    }
 
     const onChainCards = await fetchOnChainCardsOfOwner(walletAddress);
     const onChainTokenSet = new Set(onChainCards.map((c) => c.tokenId));
@@ -265,9 +270,9 @@ export async function syncWalletCards(req: AuthRequest, res: Response) {
       message: `Sinkronisasi selesai! Ditemukan ${onChainCards.length} kartu NFT di dompet Anda.`,
       totalOnChain: onChainCards.length,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Sync wallet cards error:", err);
-    res.status(500).json({ error: "Gagal sinkronisasi NFT dari blockchain" });
+    res.status(500).json({ error: err.message || "Gagal sinkronisasi NFT dari blockchain" });
   }
 }
 

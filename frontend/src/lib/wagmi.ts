@@ -1,7 +1,12 @@
 import { createConfig, http, injected } from "wagmi";
 import { baseSepolia, hardhat, sepolia } from "wagmi/chains";
 
-export const TARGET_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID || 31337);
+export const TARGET_CHAIN_ID = Number(
+  process.env.NEXT_PUBLIC_CHAIN_ID ||
+    (typeof window !== "undefined" && !window.location.hostname.includes("localhost")
+      ? 11155111
+      : 31337)
+);
 
 export async function switchToTargetNetwork() {
   if (typeof window === "undefined" || !(window as any).ethereum) return;

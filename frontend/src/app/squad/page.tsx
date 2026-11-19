@@ -103,11 +103,15 @@ export default function SquadPage() {
         await linkWallet();
       }
       if (chainId !== TARGET_CHAIN_ID) {
-        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (31337)...");
+        const netName =
+          TARGET_CHAIN_ID === 11155111
+            ? "Ethereum Sepolia (11155111)"
+            : "Hardhat Localhost (31337)";
+        setStatusMsg(`Meminta MetaMask beralih ke ${netName}...`);
         try {
           await switchToTargetNetwork();
         } catch {
-          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+          throw new Error(`Silakan setujui peralihan jaringan ke ${netName} di MetaMask!`);
         }
       }
       const { voucher } = await apiRequest<{
@@ -309,11 +313,15 @@ export default function SquadPage() {
       if (!publicClient) throw new Error("Provider Web3 belum siap");
 
       if (chainId !== TARGET_CHAIN_ID) {
-        setStatusMsg("Meminta MetaMask beralih ke Hardhat Localhost (31337)...");
+        const netName =
+          TARGET_CHAIN_ID === 11155111
+            ? "Ethereum Sepolia (11155111)"
+            : "Hardhat Localhost (31337)";
+        setStatusMsg(`Meminta MetaMask beralih ke ${netName}...`);
         try {
           await switchToTargetNetwork();
         } catch {
-          throw new Error("Silakan setujui peralihan jaringan ke Hardhat Localhost di MetaMask!");
+          throw new Error(`Silakan setujui peralihan jaringan ke ${netName} di MetaMask!`);
         }
       }
 
