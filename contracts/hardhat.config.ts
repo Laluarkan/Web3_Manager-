@@ -30,6 +30,11 @@ const config: HardhatUserConfig = {
       chainId: 84532,
       accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
     },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
+      chainId: 11155111,
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
+    },
   },
 };
 

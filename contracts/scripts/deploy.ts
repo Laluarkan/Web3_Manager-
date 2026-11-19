@@ -55,19 +55,37 @@ async function main() {
   await (await cardNft.grantRole(MINTER_ROLE, packShopAddress)).wait();
   console.log("Granted MINTER_ROLE on FootballCardNFT to CardPackShop");
 
-  // 5. Khusus Hardhat lokal: bagikan saldo uji coba KANS ke akun test
+  // 5. Bagikan saldo awal KANS ke dompet target (Localhost maupun Testnet)
+  const initialHolder1 = process.env.INITIAL_HOLDER_1 || "0x0eE46b93baca82F1ec877BE9650759Ee0813F405";
+  const initialHolder2 = process.env.INITIAL_HOLDER_2 || "0xE38fe7E71238cA4053DeD7E2747ff537B9142B8A";
+  const initialKansAmount = ethers.parseEther("50000"); // 50,000 KANS
+
+  console.log("----------------------------------------");
+  console.log("Minting initial KANS supply...");
+  await (await kansToken.mint(deployer.address, ethers.parseEther("100000"))).wait();
+  console.log(`Minted 100,000 KANS to Deployer (${deployer.address})`);
+
+  if (ethers.isAddress(initialHolder1)) {
+    await (await kansToken.mint(initialHolder1, initialKansAmount)).wait();
+    console.log(`Minted 50,000 KANS to Akun 1 (${initialHolder1})`);
+  }
+  if (ethers.isAddress(initialHolder2)) {
+    await (await kansToken.mint(initialHolder2, initialKansAmount)).wait();
+    console.log(`Minted 50,000 KANS to Akun 2 (${initialHolder2})`);
+  }
+
   if (network.name === "localhost" || network.name === "hardhat") {
     const testAmount = ethers.parseEther("10000");
-    await (await kansToken.mint(deployer.address, ethers.parseEther("100000"))).wait();
-    if (testPlayerA) {
+    if (testPlayerA && testPlayerA.address !== initialHolder1) {
       await (await kansToken.mint(testPlayerA.address, testAmount)).wait();
       console.log(`Minted 10,000 KANS to testPlayerA (${testPlayerA.address})`);
     }
-    if (testPlayerB) {
+    if (testPlayerB && testPlayerB.address !== initialHolder2) {
       await (await kansToken.mint(testPlayerB.address, testAmount)).wait();
       console.log(`Minted 10,000 KANS to testPlayerB (${testPlayerB.address})`);
     }
   }
+  console.log("----------------------------------------");
 
   // 6. Simpan alamat kontrak ke deployments/<network>.json
   const deploymentsDir = path.join(__dirname, "..", "deployments");

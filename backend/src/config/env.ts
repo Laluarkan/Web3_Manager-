@@ -28,13 +28,13 @@ export const env = {
   backendSignerPrivateKey:
     process.env.BACKEND_SIGNER_PRIVATE_KEY || (isProd ? "" : HARDHAT_LOCAL_DEV_KEY),
   kansTokenAddress:
-    process.env.KANS_TOKEN_ADDRESS || "0x99bbA657f2BbC93c02D617f8bA121cB8Fc104Acf",
+    process.env.KANS_TOKEN_ADDRESS || "0x602fb1884765b3bAd6a8365046Dda7a93176A9fb",
   cardNftAddress:
-    process.env.CARD_NFT_ADDRESS || "0x0E801D84Fa97b50751Dbf25036d067dCf18858bF",
+    process.env.CARD_NFT_ADDRESS || "0xEe52506111cFB71fE0145B7e429604ecaDB9739c",
   marketplaceAddress:
-    process.env.MARKETPLACE_ADDRESS || "0x8f86403A4DE0BB5791fa46B8e795C547942fE4Cf",
+    process.env.MARKETPLACE_ADDRESS || "0x4Ba34D8F482B82207e96027e97CB15125aFB4279",
   packShopAddress:
-    process.env.PACK_SHOP_ADDRESS || "0x9d4454B023096f34B160D6B654540c56A1F81688",
+    process.env.PACK_SHOP_ADDRESS || "0x1460b8E8B079618a7f80D49665A50D6FB439f639",
   enableTestFaucet: (process.env.ENABLE_TEST_FAUCET ?? "true") === "true",
 };
 

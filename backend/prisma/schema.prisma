@@ -5,7 +5,7 @@ generator client {
 // Lokal: gunakan "sqlite" dengan DATABASE_URL="file:./dev.db"
 // Staging (Neon): ubah provider menjadi "postgresql" tanpa mengubah kode backend!
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

@@ -2,13 +2,14 @@ import { parseAbi } from "viem";
 
 export const CONTRACT_ADDRESSES = {
   kansToken: (process.env.NEXT_PUBLIC_KANS_TOKEN_ADDRESS ||
-    "0x99bbA657f2BbC93c02D617f8bA121cB8Fc104Acf") as `0x${string}`,
+    "0x602fb1884765b3bAd6a8365046Dda7a93176A9fb") as `0x${string}`,
   cardNft: (process.env.NEXT_PUBLIC_CARD_NFT_ADDRESS ||
-    "0x0E801D84Fa97b50751Dbf25036d067dCf18858bF") as `0x${string}`,
+    process.env.NEXT_PUBLIC_FOOTBALL_CARD_NFT_ADDRESS ||
+    "0xEe52506111cFB71fE0145B7e429604ecaDB9739c") as `0x${string}`,
   marketplace: (process.env.NEXT_PUBLIC_MARKETPLACE_ADDRESS ||
-    "0x8f86403A4DE0BB5791fa46B8e795C547942fE4Cf") as `0x${string}`,
+    "0x4Ba34D8F482B82207e96027e97CB15125aFB4279") as `0x${string}`,
   packShop: (process.env.NEXT_PUBLIC_PACK_SHOP_ADDRESS ||
-    "0x9d4454B023096f34B160D6B654540c56A1F81688") as `0x${string}`,
+    "0x1460b8E8B079618a7f80D49665A50D6FB439f639") as `0x${string}`,
 };
 
 export const KANS_TOKEN_ABI = parseAbi([
