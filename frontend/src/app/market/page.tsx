@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { usePublicClient, useWriteContract, useChainId, useSwitchChain } from "wagmi";
+import { usePublicClient, useWriteContract, useChainId, useSwitchChain, useAccount, useConnect } from "wagmi";
 import { parseEther } from "viem";
 import { Coins, Search, ShoppingBag, Trash2, Wallet } from "lucide-react";
 import { useAuth } from "@/components/Providers";
@@ -12,6 +12,8 @@ import { TARGET_CHAIN_ID, switchToTargetNetwork } from "@/lib/wagmi";
 
 export default function MarketPage() {
   const { user, linkWallet } = useAuth();
+  const { address, isConnected } = useAccount();
+  const { connectAsync, connectors } = useConnect();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   const chainId = useChainId();
@@ -66,6 +68,16 @@ export default function MarketPage() {
           await (window as any).ethereum.request({ method: "eth_requestAccounts" });
         } catch {
           throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
+        }
+      }
+      if (!isConnected || !address) {
+        const injectedConnector = connectors[0];
+        if (injectedConnector) {
+          try {
+            await connectAsync({ connector: injectedConnector });
+          } catch {
+            // ignore
+          }
         }
       }
       if (!user.walletAddress) {

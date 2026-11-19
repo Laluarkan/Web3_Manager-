@@ -1,12 +1,10 @@
 import { createConfig, http, injected } from "wagmi";
 import { baseSepolia, hardhat, sepolia } from "wagmi/chains";
 
-export const TARGET_CHAIN_ID = Number(
-  process.env.NEXT_PUBLIC_CHAIN_ID ||
-    (typeof window !== "undefined" && !window.location.hostname.includes("localhost")
-      ? 11155111
-      : 31337)
-);
+export const TARGET_CHAIN_ID =
+  typeof window !== "undefined" && !window.location.hostname.includes("localhost")
+    ? 11155111
+    : Number(process.env.NEXT_PUBLIC_CHAIN_ID || 11155111);
 
 export async function switchToTargetNetwork() {
   if (typeof window === "undefined" || !(window as any).ethereum) return;
@@ -58,12 +56,12 @@ export async function switchToTargetNetwork() {
 }
 
 export const wagmiConfig = createConfig({
-  chains: [hardhat, baseSepolia, sepolia],
+  chains: [sepolia, baseSepolia, hardhat],
   connectors: [injected()],
   transports: {
-    [hardhat.id]: http("http://127.0.0.1:8545"),
-    [baseSepolia.id]: http("https://sepolia.base.org"),
     [sepolia.id]: http("https://ethereum-sepolia-rpc.publicnode.com"),
+    [baseSepolia.id]: http("https://sepolia.base.org"),
+    [hardhat.id]: http("http://127.0.0.1:8545"),
   },
   ssr: true,
 });

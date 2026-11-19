@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { usePublicClient, useWriteContract, useChainId, useSwitchChain } from "wagmi";
+import { usePublicClient, useWriteContract, useChainId, useSwitchChain, useAccount, useConnect } from "wagmi";
 import { decodeEventLog, parseEther } from "viem";
 import { ArrowUpCircle, RefreshCw, Save, Sparkles, Tag, Wallet, X } from "lucide-react";
 import { useAuth } from "@/components/Providers";
@@ -28,6 +28,8 @@ const SLOT_REQUIRED_POS: Record<string, string> = {
 
 export default function SquadPage() {
   const { user, loading: authLoading, refreshUser, linkWallet } = useAuth();
+  const { address, isConnected } = useAccount();
+  const { connectAsync, connectors } = useConnect();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   const chainId = useChainId();
@@ -106,6 +108,18 @@ export default function SquadPage() {
           throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
         }
       }
+      if (!isConnected || !address) {
+        const injectedConnector = connectors[0];
+        if (injectedConnector) {
+          try {
+            await connectAsync({ connector: injectedConnector });
+          } catch (err: any) {
+            if (err.message?.includes("User rejected")) {
+              throw new Error("Permintaan koneksi dompet dibatalkan di MetaMask.");
+            }
+          }
+        }
+      }
       if (!user.walletAddress) {
         await linkWallet();
       }
@@ -138,6 +152,7 @@ export default function SquadPage() {
       }>("/squad/starter-pack/voucher", { method: "POST" });
 
       setStatusMsg("Menunggu konfirmasi MetaMask untuk mencetak 11 NFT sekaligus...");
+      const targetAccount = (address || user.walletAddress) as `0x${string}`;
       const txHash = await writeContractAsync({
         address: CONTRACT_ADDRESSES.cardNft,
         abi: CARD_NFT_ABI,
@@ -148,6 +163,7 @@ export default function SquadPage() {
           BigInt(voucher.deadline),
           voucher.signature,
         ],
+        account: targetAccount,
         gas: BigInt(2500000),
       });
 
@@ -319,6 +335,16 @@ export default function SquadPage() {
           await (window as any).ethereum.request({ method: "eth_requestAccounts" });
         } catch {
           throw new Error("Silakan setujui izin koneksi dompet MetaMask untuk melanjutkan!");
+        }
+      }
+      if (!isConnected || !address) {
+        const injectedConnector = connectors[0];
+        if (injectedConnector) {
+          try {
+            await connectAsync({ connector: injectedConnector });
+          } catch {
+            // ignore
+          }
         }
       }
       if (!user.walletAddress) {
