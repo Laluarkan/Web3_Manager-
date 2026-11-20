@@ -87,8 +87,22 @@ function AuthStateProvider({ children }: { children: React.ReactNode }) {
           "Ekstensi Web3 (MetaMask) tidak terdeteksi. Silakan pasang MetaMask dari https://metamask.io"
         );
       }
+      const connectOnce = () => connectAsync({ connector: injectedConnector });
+      const isRejected = (e: any) =>
+        e?.code === 4001 || e?.message?.includes("User rejected") || e?.name === "UserRejectedRequestError";
       try {
-        const connected = await connectAsync({ connector: injectedConnector });
+        let connected;
+        // Status kunci MetaMask sebelum meminta koneksi (hanya ada di MetaMask)
+        const wasLocked = !(await (window as any).ethereum?._metamask?.isUnlocked?.().catch(() => true) ?? true);
+        try {
+          connected = await connectOnce();
+        } catch (err: any) {
+          // MetaMask terkunci: unlock membuka tab/popup baru sehingga permintaan pertama sering otomatis batal.
+          // Ulangi sekali setelah wallet dibuka, hanya jika memang tadinya terkunci.
+          if (!isRejected(err) || !wasLocked) throw err;
+          await new Promise((r) => setTimeout(r, 800));
+          connected = await connectOnce();
+        }
         walletAddr = connected.accounts[0];
       } catch (err: any) {
         if (err.message?.includes("Provider not found") || err.name === "ProviderNotFoundError") {
@@ -96,8 +110,13 @@ function AuthStateProvider({ children }: { children: React.ReactNode }) {
             "Ekstensi Web3 (MetaMask) tidak ditemukan di browser Anda. Pastikan ekstensi MetaMask aktif lalu refresh browser."
           );
         }
-        if (err.message?.includes("User rejected") || err.name === "UserRejectedRequestError") {
-          throw new Error("Permintaan koneksi dibatalkan di MetaMask.");
+        if (err?.code === -32002 || err.message?.includes("already pending")) {
+          throw new Error("Permintaan koneksi sudah terbuka di MetaMask. Buka MetaMask lalu setujui permintaan tersebut.");
+        }
+        if (isRejected(err)) {
+          throw new Error(
+            "Koneksi dibatalkan. Jika MetaMask terkunci, unlock dulu (login di tab MetaMask yang terbuka), lalu klik Hubungkan Wallet lagi."
+          );
         }
         throw err;
       }
