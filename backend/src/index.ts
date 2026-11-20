@@ -38,6 +38,11 @@ app.get(["/api/health", "/health"], (_req, res) => {
   });
 });
 
+// Endpoint ringan untuk UptimeRobot (GET & HEAD, tanpa akses database)
+app.get(["/api/uptime", "/uptime"], (_req, res) => {
+  res.status(200).json({ status: "ok", uptime: Math.round(process.uptime()), timestamp: new Date().toISOString() });
+});
+
 // Routing standar /api
 app.use("/api/auth", authRoutes);
 app.use("/api/squad", squadRoutes);
