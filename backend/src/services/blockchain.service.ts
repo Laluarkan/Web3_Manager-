@@ -152,7 +152,20 @@ export async function signStarterPackVoucher(
 /**
  * Membaca seluruh kartu NFT milik suatu alamat wallet langsung dari blockchain.
  */
-export async function fetchOnChainCardsOfOwner(walletAddress: string) {
+export async function fetchOnChainCardsOfOwner(walletAddress: string, retries = 6) {
+  // RPC publik bisa tertinggal beberapa detik setelah transaksi dikonfirmasi di MetaMask: ulangi bila hasil kosong/gagal
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const cards = await readCardsOfOwner(walletAddress);
+      if (cards.length > 0 || attempt >= retries) return cards;
+    } catch (err) {
+      if (attempt >= retries) throw err;
+    }
+    await sleep(2000);
+  }
+}
+
+async function readCardsOfOwner(walletAddress: string) {
   try {
     const nft = getCardNftContract(false);
     const tokenIds: bigint[] = await nft.getTokensOfOwner(walletAddress);
@@ -183,9 +196,22 @@ export async function fetchOnChainCardsOfOwner(walletAddress: string) {
   }
 }
 
-export async function fetchOnChainCard(tokenId: number) {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function fetchOnChainCard(tokenId: number, retries = 6) {
   const nft = getCardNftContract(false);
-  const [owner, meta] = await Promise.all([nft.ownerOf(tokenId), nft.getCard(tokenId)]);
+  let owner: unknown;
+  let meta: any;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      [owner, meta] = await Promise.all([nft.ownerOf(tokenId), nft.getCard(tokenId)]);
+      break;
+    } catch (err) {
+      // Token belum terlihat di node RPC (tertinggal): tunggu lalu coba lagi
+      if (attempt >= retries) throw err;
+      await sleep(2000);
+    }
+  }
   return {
     tokenId,
     owner: String(owner).toLowerCase(),
