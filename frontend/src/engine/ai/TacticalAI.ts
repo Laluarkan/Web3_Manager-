@@ -6,7 +6,9 @@ import type { AttackSequence, SimulationData, SimulationPlayer } from "@/compone
 export const PITCH_W = 105;
 export const PITCH_H = 68;
 const CY = PITCH_H / 2;
-const GOAL_HALF = 3.66; // Lebar setengah gawang (7.32m / 2)
+const GOAL_HALF = 3.66; // setengah lebar gawang (7.32 m)
+const BOX_DEPTH = 16.5;
+const BOX_HALF = 20.16;
 
 export type Tactic = "DEFENSIVE" | "BALANCED" | "ATTACKING";
 
@@ -27,17 +29,48 @@ export interface ActiveMatchBanner {
   timer: number;
 }
 
-type Step =
-  | "GATHER"
-  | "BUILDUP"
-  | "WING_WAIT"
-  | "WING_RUN"
-  | "CROSS_FLIGHT"
-  | "SHOT_WAIT"
-  | "SHOT"
-  | "REBOUND_SCRAMBLE"
-  | "REBOUND_SHOT"
-  | "AFTER";
+type ShotKind = "LONG" | "CLOSE" | "HEADER" | "FREEKICK" | "REBOUND" | "PENALTY" | "SEQ";
+type ShotOutcome = "GOAL" | "SAVED" | "BLOCKED" | "WIDE" | "POST";
+
+/**
+ * Peluang hasil tembakan di luar skenario backend. SENGAJA tanpa GOL:
+ * gol hanya berasal dari skenario backend agar skor tampilan selalu sama
+ * dengan hasil pertandingan yang tersimpan (hadiah, statistik).
+ */
+const SHOT_TABLE: Record<Exclude<ShotKind, "SEQ">, Array<[ShotOutcome, number]>> = {
+  LONG: [["SAVED", 0.42], ["WIDE", 0.3], ["BLOCKED", 0.18], ["POST", 0.1]],
+  CLOSE: [["SAVED", 0.5], ["WIDE", 0.22], ["BLOCKED", 0.18], ["POST", 0.1]],
+  HEADER: [["SAVED", 0.38], ["WIDE", 0.38], ["BLOCKED", 0.12], ["POST", 0.12]],
+  FREEKICK: [["SAVED", 0.4], ["BLOCKED", 0.25], ["WIDE", 0.27], ["POST", 0.08]],
+  REBOUND: [["SAVED", 0.45], ["BLOCKED", 0.25], ["WIDE", 0.2], ["POST", 0.1]],
+  PENALTY: [["SAVED", 0.6], ["WIDE", 0.2], ["POST", 0.2]],
+};
+
+const rollOutcome = (kind: ShotKind): ShotOutcome => {
+  const table = SHOT_TABLE[kind === "SEQ" ? "CLOSE" : kind];
+  let r = Math.random();
+  for (const [o, p] of table) {
+    r -= p;
+    if (r < 0) return o;
+  }
+  return "SAVED";
+};
+
+interface ShotEvt {
+  shooter: PlayerAgent;
+  att: Team;
+  def: Team;
+  kind: ShotKind;
+  outcome: ShotOutcome;
+  start: Vector2D;
+  t: number;
+  gk: PlayerAgent | null;
+  blocker: PlayerAgent | null;
+  seq?: AttackSequence; // skenario backend yang sedang dimainkan (untuk GOL)
+  reboundGoal?: boolean; // gol disajikan sebagai bola muntah
+}
+
+type Step = "GATHER" | "BUILDUP" | "WING_WAIT" | "WING_RUN" | "CROSS_FLIGHT" | "SHOT_WAIT" | "SHOT" | "AFTER";
 
 interface SeqRun {
   seq: AttackSequence;
@@ -54,12 +87,9 @@ interface SeqRun {
   gk: PlayerAgent;
   wingerPos: Vector2D;
   boxPos: Vector2D;
-  shotStart: Vector2D;
-  reboundAttacker?: PlayerAgent;
-  reboundTimer?: number;
 }
 
-// Formasi 4-3-3 dasar (dalam meter)
+// Formasi 4-3-3 dalam persen lapangan (dikonversi ke meter)
 const FORM_HOME: Record<string, { x: number; y: number }> = {
   GK: { x: 3, y: 50 }, LB: { x: 24, y: 18 }, LCB: { x: 19, y: 38 }, RCB: { x: 19, y: 62 },
   RB: { x: 24, y: 82 }, LCM: { x: 42, y: 32 }, CM: { x: 38, y: 50 }, RCM: { x: 42, y: 68 },
@@ -75,12 +105,14 @@ const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(ma
 const pm = (p: { x: number; y: number }) => new Vector2D((p.x * PITCH_W) / 100, (p.y * PITCH_H) / 100);
 const dirOf = (t: Team) => (t === "HOME" ? 1 : -1);
 const other = (t: Team): Team => (t === "HOME" ? "AWAY" : "HOME");
+const goalXOf = (attacking: Team) => (attacking === "HOME" ? PITCH_W : 0);
+const inBox = (attacking: Team, p: Vector2D) =>
+  Math.abs(p.y - CY) < BOX_HALF && (attacking === "HOME" ? p.x > PITCH_W - BOX_DEPTH : p.x < BOX_DEPTH);
 
 /**
- * Mesin Pertandingan Sepak Bola Super Kaya:
- * - Aliran bola dinamis (Umpan 1-2, Terobosan, Umpan Jauh dari Belakang, Crossing, Placing luar kotak)
- * - Sistem Bola Rebound dari Kiper (Penyelamatan kedua / Gol bola muntah)
- * - Aturan resmi: Offside, Sepak Pojok, Penalti, Tendangan Bebas, Lemparan ke Dalam, Tendangan Gawang
+ * Mesin pertandingan. Semua kejadian (tembakan, tepisan, rebound, offside, set piece)
+ * digerakkan oleh POSISI bola dan WAKTU SIMULASI, bukan timer jam dinding, sehingga bola
+ * selalu bergerak nyata dari titik A ke B dan ikut kecepatan 1x/2x/5x serta jeda.
  */
 export class MatchEngine {
   public agents: PlayerAgent[];
@@ -92,16 +124,30 @@ export class MatchEngine {
   public tactic: Tactic = "BALANCED";
   public possession: Team = "HOME";
   public setPieceState: SetPieceType = "NONE";
-  public setPieceTimer: number = 0;
-  public setPieceTaker: PlayerAgent | null = null;
 
+  private lastTouch: Team = "HOME";
   private receiver: PlayerAgent | null = null;
   private receiverTimer = 0;
   private decisionTimer = 1.0;
   private time = 0;
   private queue: AttackSequence[] = [];
   private run: SeqRun | null = null;
+  private shot: ShotEvt | null = null;
   private presser: Record<Team, PlayerAgent | null> = { HOME: null, AWAY: null };
+
+  // Set piece
+  private setPieceTaker: PlayerAgent | null = null;
+  private setPieceTimer = 0;
+  private placeTarget: Vector2D | null = null;
+  private placeDelay = 0;
+  private penaltyGoalSeq: AttackSequence | null = null;
+
+  // Alur lanjutan berbasis kejadian
+  private offsideFlag: PlayerAgent | null = null;
+  private shotOnReceive: { player: PlayerAgent; kind: ShotKind } | null = null;
+  private pendingShot: { shooter: PlayerAgent; kind: ShotKind; outcome?: ShotOutcome; seq?: AttackSequence; timer: number } | null = null;
+  private reboundWindow: { team: Team; timer: number } | null = null;
+  private guaranteedGoal: { seq: AttackSequence; shooter: PlayerAgent; timer: number } | null = null;
 
   constructor(sim: SimulationData) {
     const make = (players: SimulationPlayer[], team: Team) =>
@@ -121,7 +167,6 @@ export class MatchEngine {
       });
     this.agents = [...make(sim.homePlayers, "HOME"), ...make(sim.awayPlayers, "AWAY")];
 
-    // Kick-off awal babak
     const taker = this.agents.find((a) => a.team === "HOME" && a.slotCode === "ST") ?? this.agents[0];
     if (taker) {
       taker.position.set(PITCH_W / 2 - 1.5, CY);
@@ -138,10 +183,9 @@ export class MatchEngine {
     this.queue.push(seq);
   }
 
-  public triggerBanner(badge: string, title: string, subtitle?: string, duration: number = 3.2) {
+  public triggerBanner(badge: string, title: string, subtitle?: string, duration = 3.2) {
     this.activeBanner = { badge, title, subtitle, timer: duration };
-    if (subtitle) this.onCommentary?.(`${badge} ${title}: ${subtitle}`);
-    else this.onCommentary?.(`${badge} ${title}`);
+    this.onCommentary?.(subtitle ? `${badge} ${title}: ${subtitle}` : `${badge} ${title}`);
   }
 
   public get carrier(): PlayerAgent | null {
@@ -157,28 +201,29 @@ export class MatchEngine {
   private step(h: number) {
     this.time += h;
 
-    // Update banner timer
     if (this.activeBanner) {
       this.activeBanner.timer -= h;
-      if (this.activeBanner.timer <= 0) {
-        this.activeBanner = null;
-      }
+      if (this.activeBanner.timer <= 0) this.activeBanner = null;
+    }
+    if (this.reboundWindow) {
+      this.reboundWindow.timer -= h;
+      if (this.reboundWindow.timer <= 0) this.reboundWindow = null;
+    }
+    if (this.guaranteedGoal) {
+      this.guaranteedGoal.timer += h;
+      // Pengaman: bola muntah gol harus tetap berujung gol sesuai hasil backend
+      if (this.guaranteedGoal.timer > 6 && !this.carrier) this.take(this.guaranteedGoal.shooter);
     }
 
-    // Cek apakah sedang dalam kondisi Set Piece (Tendangan bebas, Corner, Penalti, dll)
     if (this.setPieceState !== "NONE") {
       this.stepSetPiece(h);
     } else {
-      // Ambil antrean serangan terstruktur jika ada
-      if (!this.run && this.queue.length) {
+      if (!this.run && !this.shot && !this.guaranteedGoal && this.queue.length) {
         this.startSequence(this.queue.shift()!);
       }
-
-      if (this.run) {
-        this.stepSequence(h);
-      } else {
-        this.stepOpenPlay(h);
-      }
+      if (this.shot) this.stepShot(h);
+      else if (this.run) this.stepSequence(h);
+      else this.stepOpenPlay(h);
 
       this.controlBall(h);
       this.checkPitchBoundaries();
@@ -189,218 +234,58 @@ export class MatchEngine {
     this.ball.update(h);
   }
 
-  // ---------------------------------------------------------------- BOLA KELUAR / OUT OF BOUNDS
-  private checkPitchBoundaries() {
-    if (this.setPieceState !== "NONE" || this.run) return;
-    const bp = this.ball.position;
-
-    // 1. Lemparan ke dalam (Touchline Out: y < 0 atau y > 68)
-    if (bp.y < 0.5 || bp.y > PITCH_H - 0.5) {
-      const outTeam = other(this.possession);
-      const taker = this.agents
-        .filter((a) => a.team === outTeam && a.positionRole !== "GK")
-        .sort((a, b) => a.position.dist(bp) - b.position.dist(bp))[0];
-
-      if (taker) {
-        const lineY = bp.y < 0.5 ? 0 : PITCH_H;
-        this.ball.placeAt(clamp(bp.x, 2, PITCH_W - 2), lineY);
-        this.setPieceState = "THROW_IN";
-        this.setPieceTaker = taker;
-        this.setPieceTimer = 2.4;
-        this.triggerBanner("🤾", "LEMPARAN KE DALAM", `${taker.name} bersiap melempar bola ke dalam`, 2.5);
-      }
-      return;
-    }
-
-    // 2. Garis Akhir (Goal Line: x < 0 atau x > 105)
-    if (bp.x < 0 || bp.x > PITCH_W) {
-      const isLeft = bp.x < 0;
-      const defendingTeam: Team = isLeft ? "HOME" : "AWAY";
-      const isInsideGoal = bp.y >= CY - GOAL_HALF && bp.y <= CY + GOAL_HALF;
-
-      if (!isInsideGoal) {
-        // Tembakan/Pantulan keluar garis gawang
-        if (this.possession === defendingTeam) {
-          // Sentuhan terakhir tim bertahan -> SEPAK POJOK (CORNER)
-          this.awardCorner(other(defendingTeam), isLeft ? 0 : PITCH_W, bp.y < CY ? 0 : PITCH_H);
-        } else {
-          // Sentuhan terakhir tim penyerang -> TENDANGAN GAWANG (GOAL KICK)
-          this.awardGoalKick(defendingTeam);
-        }
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------- SET PIECES (ATURAN PERMAINAN)
-
-  public awardCorner(attTeam: Team, cornerX: number, cornerY: number) {
-    const taker = this.agents
-      .filter((a) => a.team === attTeam && (a.slotCode === "LW" || a.slotCode === "RW" || a.positionRole === "MF"))
-      .sort((a, b) => a.position.dist(new Vector2D(cornerX, cornerY)) - b.position.dist(new Vector2D(cornerX, cornerY)))[0];
-
-    this.ball.placeAt(cornerX, cornerY);
-    this.setPieceState = "CORNER";
-    this.setPieceTaker = taker;
-    this.setPieceTimer = 3.0;
-    this.possession = attTeam;
-    this.triggerBanner("⛳", "SEPAK POJOK!", `Peluang emas tendangan sudut untuk ${attTeam === "HOME" ? "Tim Tuan Rumah" : "Tim Tamu"}`, 3.5);
-  }
-
-  public awardPenalty(attTeam: Team) {
-    const penaltySpotX = attTeam === "HOME" ? 94 : 11;
-    const taker = this.agents.find((a) => a.team === attTeam && a.slotCode === "ST") ?? this.agents[0];
-
-    this.ball.placeAt(penaltySpotX, CY);
-    this.setPieceState = "PENALTY";
-    this.setPieceTaker = taker;
-    this.setPieceTimer = 3.8;
-    this.possession = attTeam;
-    this.triggerBanner("⚡", "PENALTI!", `Pelanggaran keras di kotak terlarang! ${taker.name} maju sebagai algojo`, 4.0);
-  }
-
-  public awardFreeKick(attTeam: Team, foulPos: Vector2D) {
-    const taker = this.agents.find((a) => a.team === attTeam && (a.positionRole === "MF" || a.slotCode === "ST")) ?? this.agents[0];
-
-    this.ball.placeAt(foulPos.x, foulPos.y);
-    this.setPieceState = "FREE_KICK";
-    this.setPieceTaker = taker;
-    this.setPieceTimer = 3.2;
-    this.possession = attTeam;
-    this.triggerBanner("🧱", "TENDANGAN BEBAS!", `Peluang tendangan bebas berbahaya berjarak ${Math.round(foulPos.dist(new Vector2D(attTeam === "HOME" ? PITCH_W : 0, CY)))} meter!`, 3.5);
-  }
-
-  public awardOffside(caughtPlayer: PlayerAgent) {
-    const defendingTeam = other(caughtPlayer.team);
-    const gk = this.agents.find((a) => a.team === defendingTeam && a.positionRole === "GK");
-
-    this.ball.placeAt(caughtPlayer.position.x, caughtPlayer.position.y);
-    this.setPieceState = "OFFSIDE";
-    this.setPieceTaker = gk || null;
-    this.setPieceTimer = 2.8;
-    this.possession = defendingTeam;
-    this.triggerBanner("🚩", "OFFSIDE!", `Hakim garis mengangkat bendera! ${caughtPlayer.name} berdiri di posisi offside`, 3.0);
-  }
-
-  public awardGoalKick(defTeam: Team) {
-    const gk = this.agents.find((a) => a.team === defTeam && a.positionRole === "GK");
-    const gkBoxX = defTeam === "HOME" ? 5.5 : PITCH_W - 5.5;
-
-    this.ball.placeAt(gkBoxX, CY);
-    this.setPieceState = "GOAL_KICK";
-    this.setPieceTaker = gk || null;
-    this.setPieceTimer = 2.5;
-    this.possession = defTeam;
-    this.triggerBanner("🧤", "TENDANGAN GAWANG", `Kiper ${gk?.name || "Kiper"} bersiap melakukan tendangan gawang`, 2.5);
-  }
-
-  private stepSetPiece(h: number) {
-    this.setPieceTimer -= h;
-    const taker = this.setPieceTaker;
-    const bp = this.ball.position;
-
-    if (taker) {
-      taker.setDesired(bp.x, bp.y, 0.85);
-    }
-
-    if (this.setPieceTimer <= 0) {
-      // Eksekusi Set Piece setelah countdown selesai
-      const sp = this.setPieceState;
-      this.setPieceState = "NONE";
-      this.setPieceTaker = null;
-
-      if (!taker) return;
-
-      if (sp === "CORNER") {
-        // Umpan silang melambung dari sudut ke kotak penalti
-        const d = dirOf(taker.team);
-        const targetBox = new Vector2D(
-          taker.team === "HOME" ? PITCH_W - 8 : 8,
-          CY + (Math.random() * 8 - 4)
-        );
-        this.ball.cross(targetBox, 1.3, 6.5);
-        this.onCommentary?.(`⛳ ${taker.name} melepas tendangan sudut melengkung ke jantung pertahanan!`);
-
-        // Siapkan penyerang untuk duel sundulan
-        const headerAttacker = this.agents.find((a) => a.team === taker.team && (a.slotCode === "ST" || a.positionRole === "DF"));
-        if (headerAttacker) {
-          this.receiver = headerAttacker;
-          this.receiverTimer = 3.5;
-        }
-      } else if (sp === "PENALTY") {
-        // Eksekusi tendangan penalti
-        const targetGoalX = taker.team === "HOME" ? PITCH_W : 0;
-        const targetY = CY + (Math.random() < 0.5 ? -2.2 : 2.2);
-        const isGoal = Math.random() < 0.76;
-
-        this.onCommentary?.(`⚡ ${taker.name} mengambil ancang-ancang... MENEMBAK KERAS!`);
-        this.ball.shoot(new Vector2D(targetGoalX, targetY), 32);
-
-        if (isGoal) {
-          setTimeout(() => {
-            this.triggerBanner("⚽", "GOL PENALTI!", `Dingin! Eksekusi penalti sempurna dari ${taker.name}!`, 3.5);
-            this.scoreSyntheticGoal(taker);
-          }, 450);
-        } else {
-          setTimeout(() => {
-            this.triggerBanner("🧤", "PENALTI DITEPIZ!", `PENYELAMATAN FANTASTIS! Kiper berhasil membaca arah tembakan penalti!`, 3.5);
-            this.ball.deflect(taker.team === "HOME" ? Math.PI : 0, 7.5);
-          }, 420);
-        }
-      } else if (sp === "FREE_KICK") {
-        // Eksekusi tendangan bebas langsung atau umpan
-        const goalPos = new Vector2D(taker.team === "HOME" ? PITCH_W : 0, CY);
-        const dist = bp.dist(goalPos);
-
-        if (dist < 28 && Math.random() < 0.65) {
-          // Tembakan langsung melewati pagar betis
-          this.ball.cross(new Vector2D(goalPos.x, CY + (Math.random() * 5 - 2.5)), 1.1, 4.2);
-          this.onCommentary?.(`🧱 ${taker.name} mengeksekusi tendangan bebas melewati pagar betis!`);
-        } else {
-          // Umpan terobosan / crossing
-          this.ball.cross(new Vector2D(goalPos.x - dirOf(taker.team) * 8, CY), 1.2, 5.0);
-          this.onCommentary?.(`🧱 ${taker.name} mengangkat bola ke dalam kotak penalti!`);
-        }
-      } else if (sp === "THROW_IN") {
-        // Lempar ke rekan terdekat
-        const teammate = this.agents
-          .filter((a) => a.team === taker.team && a !== taker)
-          .sort((a, b) => a.position.dist(taker.position) - b.position.dist(taker.position))[0];
-
-        if (teammate) {
-          this.sendPass(teammate, 12);
-          this.onCommentary?.(`🤾 ${taker.name} melempar bola ke ${teammate.name}.`);
-        } else {
-          this.take(taker);
-        }
-      } else if (sp === "GOAL_KICK" || sp === "OFFSIDE") {
-        // Kiper/bek menendang jauh ke lini tengah atau umpan pendek
-        if (Math.random() < 0.6) {
-          const midPos = new Vector2D(PITCH_W / 2 + dirOf(taker.team) * 5, CY + (Math.random() * 20 - 10));
-          this.ball.cross(midPos, 1.6, 7.5);
-          this.onCommentary?.(`🚀 Tendangan lambung jauh dilepas mengarah ke lini tengah.`);
-        } else {
-          const cb = this.agents.find((a) => a.team === taker.team && a.slotCode === "LCB") || taker;
-          this.sendPass(cb, 14);
-        }
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------- KEPEMILIKAN BOLA & KONTROL
+  // ================================================================ KEPEMILIKAN BOLA
 
   private take(a: PlayerAgent) {
     this.ball.setCarrier(a);
     this.receiver = null;
     this.possession = a.team;
+    this.lastTouch = a.team;
     this.decisionTimer = 0.8 + Math.random() * 1.0;
+    if (this.offsideFlag && this.offsideFlag !== a) this.offsideFlag = null;
+    if (this.pendingShot && this.pendingShot.shooter !== a) this.pendingShot = null;
+
+    // Peluang menembak lanjutan setelah menerima bola
+    if (this.guaranteedGoal && a.team === this.guaranteedGoal.seq.team) {
+      this.pendingShot = { shooter: a, kind: "REBOUND", outcome: "GOAL", seq: this.guaranteedGoal.seq, timer: 0.3 };
+      this.guaranteedGoal = null;
+    } else if (this.shotOnReceive && this.shotOnReceive.player === a) {
+      this.pendingShot = { shooter: a, kind: this.shotOnReceive.kind, timer: 0.3 };
+    } else if (this.reboundWindow && a.team === this.reboundWindow.team && this.inDanger(a)) {
+      this.pendingShot = { shooter: a, kind: "REBOUND", timer: 0.25 };
+      this.reboundWindow = null;
+    } else if (this.reboundWindow && a.team !== this.reboundWindow.team) {
+      this.reboundWindow = null;
+    }
+    this.shotOnReceive = null;
+  }
+
+  private inDanger(a: PlayerAgent) {
+    return a.position.dist(new Vector2D(goalXOf(a.team), CY)) < 24 && Math.abs(a.position.y - CY) < 20;
   }
 
   private sendPass(to: PlayerAgent, speed: number) {
     const lead = to.position.clone().add(Vector2D.mult(to.velocity, 0.45));
-    this.ball.pass(lead, speed);
+    this.passTo(lead, to, speed);
+  }
+
+  /** Operan datar ke titik tertentu dengan penerima yang ditentukan */
+  private passTo(point: Vector2D, to: PlayerAgent, speed: number) {
+    if (this.carrier) this.lastTouch = this.carrier.team;
+    this.ball.pass(point, speed);
     this.receiver = to;
     this.receiverTimer = 4.5;
     this.possession = to.team;
+  }
+
+  /** Umpan lambung (crossing / umpan jauh / tendangan pojok) */
+  private crossTo(from: PlayerAgent, target: Vector2D, to: PlayerAgent, duration: number, apex: number, shotKind?: ShotKind) {
+    this.ball.cross(target, duration, apex);
+    this.receiver = to;
+    this.receiverTimer = duration + 3.5;
+    this.possession = from.team;
+    this.lastTouch = from.team;
+    this.shotOnReceive = shotKind ? { player: to, kind: shotKind } : null;
   }
 
   private controlBall(h: number) {
@@ -409,9 +294,14 @@ export class MatchEngine {
       const r = this.receiver;
       this.receiverTimer -= h;
       if (r.position.dist(ball.position) < 1.6 && ball.z < 1.8 && ball.mode !== "CROSS") {
+        if (this.offsideFlag === r) {
+          this.awardOffside(r);
+          return;
+        }
         this.take(r);
       } else {
-        if (!this.run && ball.mode === "FLIGHT") {
+        const canIntercept = !this.run && !this.guaranteedGoal && (ball.mode === "FLIGHT" || ball.mode === "LOOSE");
+        if (canIntercept) {
           for (const o of this.agents) {
             if (o.team !== r.team && o.position.dist(ball.position) < 1.3 && Math.random() < 2.5 * h) {
               this.take(o);
@@ -419,7 +309,10 @@ export class MatchEngine {
             }
           }
         }
-        if (this.receiverTimer <= 0) this.receiver = null;
+        if (this.receiverTimer <= 0) {
+          this.receiver = null;
+          this.offsideFlag = null;
+        }
       }
     } else if (!this.carrier && ball.mode === "LOOSE") {
       let best: PlayerAgent | null = null;
@@ -435,172 +328,430 @@ export class MatchEngine {
     }
   }
 
-  // ---------------------------------------------------------------- PERMAINAN TERBUKA KAYA & DINAMIS
+  // ================================================================ BOLA KELUAR LAPANGAN
+
+  private checkPitchBoundaries() {
+    if (this.run || this.shot || this.guaranteedGoal) return;
+    const bp = this.ball.position;
+    const lastTeam = this.lastTouch;
+
+    if (bp.y < 0 || bp.y > PITCH_H) {
+      const team = other(lastTeam);
+      const place = new Vector2D(clamp(bp.x, 3, PITCH_W - 3), bp.y < 0 ? 0 : PITCH_H);
+      const taker = this.nearestOutfield(team, place);
+      if (taker) {
+        this.beginSetPiece("THROW_IN", place, taker, 1.6);
+        this.triggerBanner("🤾", "LEMPARAN KE DALAM", `${taker.name} bersiap melempar bola`, 2.4);
+      }
+      return;
+    }
+
+    if (bp.x < 0 || bp.x > PITCH_W) {
+      const defTeam: Team = bp.x < 0 ? "HOME" : "AWAY";
+      if (lastTeam === defTeam) {
+        this.awardCorner(other(defTeam), bp.x < 0 ? 0 : PITCH_W, bp.y < CY ? 0 : PITCH_H);
+      } else {
+        this.awardGoalKick(defTeam);
+      }
+    }
+  }
+
+  private nearestOutfield(team: Team, p: Vector2D): PlayerAgent | undefined {
+    return this.agents
+      .filter((a) => a.team === team && a.positionRole !== "GK")
+      .sort((a, b) => a.position.dist(p) - b.position.dist(p))[0];
+  }
+
+  // ================================================================ SET PIECE
+
+  /** Memulai set piece: bola menggelinding dulu, baru diletakkan di titik tendangan setelah jeda wajar. */
+  private beginSetPiece(type: SetPieceType, place: Vector2D, taker: PlayerAgent | null, timer: number) {
+    if (this.ball.carrier || this.ball.mode === "CROSS") this.ball.release();
+    this.receiver = null;
+    this.pendingShot = null;
+    this.shotOnReceive = null;
+    this.offsideFlag = null;
+    this.reboundWindow = null;
+    this.setPieceState = type;
+    this.setPieceTaker = taker;
+    this.setPieceTimer = timer;
+    this.placeTarget = place.clone();
+    this.placeDelay = this.ball.position.dist(place) < 2.5 ? 0 : 0.8;
+    if (this.placeDelay === 0) this.ball.placeAt(place.x, place.y);
+    if (taker) this.possession = taker.team;
+  }
+
+  public awardCorner(att: Team, cornerX: number, cornerY: number) {
+    const spot = new Vector2D(cornerX, cornerY);
+    const taker =
+      this.agents
+        .filter((a) => a.team === att && a.positionRole !== "GK" && a.positionRole !== "DF")
+        .sort((a, b) => a.position.dist(spot) - b.position.dist(spot))[0] ?? null;
+    this.beginSetPiece("CORNER", spot, taker, 2.2);
+    this.triggerBanner("⛳", "SEPAK POJOK!", `Tendangan sudut untuk ${att === "HOME" ? "tim tuan rumah" : "tim tamu"}`, 3.2);
+  }
+
+  public awardPenalty(att: Team, preferred?: PlayerAgent) {
+    const spot = new Vector2D(att === "HOME" ? PITCH_W - 11 : 11, CY);
+    const taker = preferred ?? this.agents.find((a) => a.team === att && a.slotCode === "ST") ?? null;
+    this.beginSetPiece("PENALTY", spot, taker, 2.6);
+    this.triggerBanner("⚡", "PENALTI!", `Pelanggaran di kotak terlarang! ${taker?.name ?? "Algojo"} maju sebagai eksekutor`, 3.6);
+  }
+
+  public awardFreeKick(att: Team, foulPos: Vector2D) {
+    const taker =
+      this.agents
+        .filter((a) => a.team === att && a.positionRole !== "GK")
+        .sort((a, b) => b.topSpeed - a.topSpeed)[0] ?? null;
+    this.beginSetPiece("FREE_KICK", foulPos, taker, 2.4);
+    const dist = Math.round(foulPos.dist(new Vector2D(goalXOf(att), CY)));
+    this.triggerBanner("🧱", "TENDANGAN BEBAS!", `Berjarak sekitar ${dist} meter dari gawang`, 3.0);
+  }
+
+  public awardOffside(caught: PlayerAgent) {
+    const defTeam = other(caught.team);
+    const taker = this.nearestOutfield(defTeam, this.ball.position) ?? null;
+    this.beginSetPiece("OFFSIDE", this.ball.position.clone(), taker, 1.8);
+    this.triggerBanner("🚩", "OFFSIDE!", `Bendera hakim garis naik! ${caught.name} lebih maju dari bek terakhir`, 3.0);
+  }
+
+  public awardGoalKick(defTeam: Team) {
+    const gk = this.agents.find((a) => a.team === defTeam && a.positionRole === "GK") ?? null;
+    const spot = new Vector2D(defTeam === "HOME" ? 5.5 : PITCH_W - 5.5, CY);
+    this.beginSetPiece("GOAL_KICK", spot, gk, 1.8);
+    this.triggerBanner("🧤", "TENDANGAN GAWANG", `${gk?.name ?? "Kiper"} bersiap menendang bola dari kotak 6 yard`, 2.4);
+  }
+
+  private stepSetPiece(h: number) {
+    const taker = this.setPieceTaker;
+    if (this.placeDelay > 0) {
+      this.placeDelay -= h;
+      if (this.placeDelay <= 0 && this.placeTarget) this.ball.placeAt(this.placeTarget.x, this.placeTarget.y);
+    } else {
+      this.setPieceTimer -= h;
+    }
+    const spot = this.placeTarget ?? this.ball.position;
+    taker?.setDesired(spot.x, spot.y, 0.85);
+
+    if (this.placeDelay > 0 || this.setPieceTimer > 0) return;
+    // Tunggu penendang tiba di dekat bola (maks. 2.5 dtk tambahan)
+    if (taker && taker.position.dist(this.ball.position) > 1.8 && this.setPieceTimer > -2.5) return;
+
+    const sp = this.setPieceState;
+    this.setPieceState = "NONE";
+    this.setPieceTaker = null;
+    this.placeTarget = null;
+    if (!taker) return;
+    this.executeSetPiece(sp, taker);
+  }
+
+  private executeSetPiece(sp: SetPieceType, taker: PlayerAgent) {
+    const att = taker.team;
+    const d = dirOf(att);
+    const gx = goalXOf(att);
+    const bp = this.ball.position;
+
+    if (sp === "KICK_OFF" || sp === "THROW_IN" || sp === "OFFSIDE") {
+      this.take(taker);
+      this.doNormalPass(taker, sp === "THROW_IN" ? 12 : undefined);
+      if (sp === "THROW_IN") this.onCommentary?.(`🤾 ${taker.name} melempar bola ke dalam.`);
+      return;
+    }
+
+    if (sp === "PENALTY") {
+      const seq = this.penaltyGoalSeq ?? undefined;
+      this.penaltyGoalSeq = null;
+      this.onCommentary?.(`⚡ ${taker.name} mengambil ancang-ancang... menembak!`);
+      this.launchShot(taker, "PENALTY", seq ? "GOAL" : undefined, seq);
+      return;
+    }
+
+    if (sp === "FREE_KICK") {
+      if (bp.dist(new Vector2D(gx, CY)) < 30 && Math.random() < 0.6) {
+        this.onCommentary?.(`🧱 ${taker.name} mengeksekusi tendangan bebas langsung ke arah gawang!`);
+        this.launchShot(taker, "FREEKICK");
+      } else {
+        this.crossIntoBox(taker, "HEADER", `🧱 ${taker.name} mengangkat bola bebas ke dalam kotak penalti!`);
+      }
+      return;
+    }
+
+    if (sp === "CORNER") {
+      this.crossIntoBox(taker, "HEADER", `⛳ ${taker.name} melepas tendangan sudut melengkung ke kotak penalti!`);
+      return;
+    }
+
+    if (sp === "GOAL_KICK") {
+      if (Math.random() < 0.55) {
+        const target = new Vector2D(PITCH_W / 2 + d * 6, CY + (Math.random() * 20 - 10));
+        const rec = this.agents
+          .filter((a) => a.team === att && a.positionRole !== "GK" && a.positionRole !== "DF")
+          .sort((a, b) => a.position.dist(target) - b.position.dist(target))[0];
+        if (rec) {
+          this.onCommentary?.(`🚀 ${taker.name} menendang bola jauh ke lini tengah.`);
+          this.crossTo(taker, target, rec, 1.6, 7.5);
+          return;
+        }
+      }
+      this.take(taker);
+      this.doNormalPass(taker);
+    }
+  }
+
+  /** Umpan lambung ke kotak penalti, penerima akan langsung menyundul/menembak */
+  private crossIntoBox(taker: PlayerAgent, shotKind: ShotKind, text: string) {
+    const att = taker.team;
+    const d = dirOf(att);
+    const gx = goalXOf(att);
+    const target = new Vector2D(gx - d * 9, CY + (Math.random() * 8 - 4));
+    const rec = this.agents
+      .filter((a) => a.team === att && a !== taker && a.positionRole !== "GK")
+      .sort((a, b) => (a.slotCode === "ST" ? -1 : 0) - (b.slotCode === "ST" ? -1 : 0) || a.position.dist(target) - b.position.dist(target))[0];
+    if (!rec) {
+      this.take(taker);
+      return;
+    }
+    this.onCommentary?.(text);
+    this.crossTo(taker, target, rec, 1.3, 6.5, shotKind);
+  }
+
+  // ================================================================ TEMBAKAN (BERBASIS POSISI BOLA)
+
+  private launchShot(
+    shooter: PlayerAgent,
+    kind: ShotKind,
+    forced?: ShotOutcome,
+    seq?: AttackSequence,
+    extra?: { reboundGoal?: boolean; blocker?: PlayerAgent; gk?: PlayerAgent }
+  ) {
+    const att = shooter.team;
+    const def = other(att);
+    const outcome = forced ?? rollOutcome(kind);
+    const gx = goalXOf(att);
+    const side = Math.random() < 0.5 ? -1 : 1;
+
+    let ty = CY;
+    if (outcome === "GOAL") ty = CY + side * (1 + Math.random() * 1.8);
+    else if (outcome === "SAVED") ty = CY + side * Math.random() * 2;
+    else if (outcome === "POST") ty = CY + side * GOAL_HALF;
+    else if (outcome === "WIDE") {
+      ty = seq ? pm(seq.finishCoord).y : CY + side * (GOAL_HALF + 2 + Math.random() * 5);
+      if (Math.abs(ty - CY) < GOAL_HALF + 1.5) ty = CY + (ty < CY ? -1 : 1) * (GOAL_HALF + 2.5);
+    }
+
+    const start = this.ball.position.clone();
+    const dir = Vector2D.sub(new Vector2D(gx, ty), start).normalize();
+    const far = start.clone().add(Vector2D.mult(dir, start.dist(new Vector2D(gx, ty)) + 3));
+    const speed = kind === "PENALTY" ? 28 : kind === "FREEKICK" ? 27 : kind === "HEADER" ? 24 : outcome === "BLOCKED" ? 25 : 31;
+    this.ball.shoot(far, speed);
+
+    this.receiver = null;
+    this.pendingShot = null;
+    this.possession = att;
+    this.lastTouch = att;
+
+    const gk = extra?.gk ?? this.agents.find((a) => a.team === def && a.positionRole === "GK") ?? null;
+    const blocker = kind === "PENALTY" ? null : extra?.blocker ?? this.nearestOutfield(def, start) ?? null;
+    this.shot = { shooter, att, def, kind, outcome, start, t: 0, gk, blocker, seq, reboundGoal: extra?.reboundGoal };
+
+    if (kind !== "SEQ" && kind !== "PENALTY") {
+      const label = kind === "HEADER" ? "SUNDULAN KERAS!" : kind === "REBOUND" ? "SAMBARAN BOLA MUNTAH!" : kind === "FREEKICK" ? "TENDANGAN BEBAS KE GAWANG!" : "TEMBAKAN KERAS!";
+      this.triggerBanner("🚀", label, `${shooter.name} melepaskan tembakan ke arah gawang`, 2.2);
+    }
+  }
+
+  private stepShot(h: number) {
+    const s = this.shot!;
+    s.t += h;
+    const ball = this.ball;
+    const pos = ball.position;
+    const dd = dirOf(s.att);
+    const gx = goalXOf(s.att);
+    const toLine = Math.abs(gx - pos.x);
+    const back = dd > 0 ? Math.PI : 0;
+    const spread = (w: number) => back + (Math.random() - 0.5) * w;
+    const gkName = s.gk?.name ?? "Kiper";
+
+    if (s.t > 4) {
+      this.endShot(s);
+      return;
+    }
+
+    switch (s.outcome) {
+      case "BLOCKED":
+        if (pos.dist(s.start) > 3) {
+          this.triggerBanner("🛡️", "TEMBAKAN DIBLOK!", `${s.blocker?.name ?? "Bek"} meluncur memblok sepakan ${s.shooter.name}`, 2.4);
+          ball.deflect(spread(1.8), 9);
+          this.endShot(s, 2.5);
+        }
+        break;
+      case "SAVED":
+        if (toLine < 2.5) {
+          if (s.reboundGoal && s.seq) {
+            // Kiper menepis, bola muntah jatuh ke kaki penembak yang sama lalu disambar jadi GOL
+            this.triggerBanner("🧤", "DITEPIS KIPER!", `${gkName} menepis, bola muntah di depan gawang!`, 2.6);
+            const ang = Math.atan2(s.shooter.position.y - pos.y, s.shooter.position.x - pos.x);
+            ball.deflect(ang, 6);
+            this.receiver = s.shooter;
+            this.receiverTimer = 5;
+            this.guaranteedGoal = { seq: s.seq, shooter: s.shooter, timer: 0 };
+            this.shot = null;
+            this.run = null;
+            return;
+          }
+          this.triggerBanner("🧤", "PENYELAMATAN HEBAT!", `${gkName} menepis sepakan ${s.shooter.name}!`, 2.6);
+          ball.deflect(spread(1.6), 8);
+          this.endShot(s, 3.2);
+        }
+        break;
+      case "POST":
+        if (toLine < 0.8) {
+          this.triggerBanner("💥", "MENGHANTAM TIANG!", `Tendangan ${s.shooter.name} membentur tiang gawang!`, 2.6);
+          ball.deflect(spread(1.0), 10);
+          this.endShot(s, 2.5);
+        }
+        break;
+      case "GOAL":
+        if ((dd > 0 && pos.x > PITCH_W + 0.3) || (dd < 0 && pos.x < -0.3)) {
+          const seq = s.seq;
+          this.shot = null;
+          this.run = null;
+          if (seq) this.scoreGoal(seq);
+        }
+        break;
+      default: // WIDE
+        if ((dd > 0 && pos.x > PITCH_W + 1) || (dd < 0 && pos.x < -1)) {
+          this.triggerBanner("💨", "TEMBAKAN MELENCENG!", `Sepakan ${s.shooter.name} melebar dari gawang`, 2.4);
+          this.shot = null;
+          this.run = null;
+          this.lastTouch = s.att;
+          this.awardGoalKick(s.def);
+        }
+    }
+  }
+
+  /** Tembakan selesai tanpa gol: bola liar -> peluang rebound bagi tim penyerang */
+  private endShot(s: ShotEvt, reboundSeconds = 0) {
+    this.shot = null;
+    this.run = null;
+    if (reboundSeconds > 0 && this.ball.mode === "LOOSE") this.reboundWindow = { team: s.att, timer: reboundSeconds };
+  }
+
+  // ================================================================ PERMAINAN TERBUKA
 
   private stepOpenPlay(h: number) {
     const c = this.carrier;
     if (!c) return;
     this.possession = c.team;
 
-    // Tekel / Rebut bola dari lawan dengan probabilitas pelanggaran
+    if (this.pendingShot && this.pendingShot.shooter === c) {
+      this.pendingShot.timer -= h;
+      if (this.pendingShot.timer <= 0) {
+        const p = this.pendingShot;
+        this.pendingShot = null;
+        this.launchShot(c, p.kind, p.outcome, p.seq);
+      }
+      return;
+    }
+
     for (const o of this.agents) {
       if (o.team === c.team || o.positionRole === "GK") continue;
-      if (o.position.dist(c.position) < 1.8) {
-        const stealChance = (0.12 + 0.25 * o.aggression) * h;
-        if (Math.random() < stealChance) {
-          // Kemungkinan pelanggaran (Foul) 18%
-          if (Math.random() < 0.18) {
-            this.handleFoul(c, o);
-            return;
-          }
-          this.take(o);
+      if (o.position.dist(c.position) < 1.8 && Math.random() < (0.12 + 0.25 * o.aggression) * h) {
+        if (Math.random() < 0.15) {
+          this.handleFoul(c);
           return;
         }
+        this.take(o);
+        return;
       }
     }
 
     this.decisionTimer -= h;
-    if (this.decisionTimer <= 0) {
-      this.doRichTacticalDecision(c);
-    }
+    if (this.decisionTimer <= 0) this.doRichTacticalDecision(c);
   }
 
-  private handleFoul(victim: PlayerAgent, perpetrator: PlayerAgent) {
-    const foulPos = victim.position.clone();
-    const isInsideBox =
-      victim.team === "HOME"
-        ? foulPos.x > 88.5 && foulPos.y > 13.8 && foulPos.y < 54.2
-        : foulPos.x < 16.5 && foulPos.y > 13.8 && foulPos.y < 54.2;
-
-    if (isInsideBox) {
+  private handleFoul(victim: PlayerAgent) {
+    const pos = victim.position.clone();
+    if (inBox(victim.team, pos)) {
       this.awardPenalty(victim.team);
     } else {
-      this.awardFreeKick(victim.team, foulPos);
+      this.awardFreeKick(victim.team, pos);
     }
   }
 
-  /**
-   * Pengambilan Keputusan Taktis Tingkat Lanjut:
-   * 1. Umpan Lambung dari Belakang langsung ke Depan (Long Ball)
-   * 2. Tusukan Sayap & Crossing Melambung
-   * 3. Umpan Terobosan Membelah Pertahanan (Through Ball)
-   * 4. Tembakan Spekulasi Jarak Jauh (Long Shot)
-   * 5. Umpan Tiki-Taka 1-2
-   */
   private doRichTacticalDecision(c: PlayerAgent) {
-    const d = dirOf(c.team);
-    const depth = c.team === "HOME" ? c.position.x : PITCH_W - c.position.x;
-    const goalX = c.team === "HOME" ? PITCH_W : 0;
-    const distToGoal = c.position.dist(new Vector2D(goalX, CY));
+    const att = c.team;
+    const d = dirOf(att);
+    const depth = att === "HOME" ? c.position.x : PITCH_W - c.position.x;
+    const goalPos = new Vector2D(goalXOf(att), CY);
+    const distToGoal = c.position.dist(goalPos);
+    const attacking = att === "HOME" && this.tactic === "ATTACKING";
 
-    // A. PELUANG 1: Tembakan Jarak Jauh (Long Shot) jika di depan kotak penalti (< 26m)
-    if (distToGoal < 26 && distToGoal > 14 && (c.positionRole === "MF" || c.positionRole === "FW")) {
-      const shotRoll = Math.random();
-      const shotThreshold = this.tactic === "ATTACKING" ? 0.38 : 0.22;
-
-      if (shotRoll < shotThreshold) {
-        this.triggerBanner("🚀", "TEMBAKAN KERAS JARAK JAUH!", `${c.name} melepaskan sepakan geledek spekulasi dari luar kotak penalti!`, 2.5);
-        const targetY = CY + (Math.random() * 6 - 3);
-        this.ball.shoot(new Vector2D(goalX, targetY), 30);
-        this.decisionTimer = 2.0;
-
-        // Simulasi tepisan kiper menghasilkan REBOUND
-        setTimeout(() => {
-          if (Math.random() < 0.65) {
-            this.ball.deflect(c.team === "HOME" ? Math.PI : 0, 7.0);
-            this.triggerBanner("🧤", "TEPISAN REBOUND!", `Kiper menepis tembakan deras! Bola muntah bergulir liar di kotak penalti!`, 3.0);
-            this.scrambleRebound(c.team);
-          }
-        }, 320);
+    // Tembakan: dekat gawang atau spekulasi dari luar kotak
+    if (c.positionRole !== "DF" && distToGoal < 26) {
+      const close = distToGoal <= 14;
+      const p = close ? 0.55 : attacking ? 0.38 : 0.22;
+      if (Math.random() < p) {
+        this.launchShot(c, close ? "CLOSE" : "LONG");
         return;
       }
     }
 
-    // B. PELUANG 2: Tusukan Sayap & Crossing Melambung (Wing Cross)
-    const isFlank = c.position.y < 16 || c.position.y > PITCH_H - 16;
-    if (isFlank && depth > 68) {
-      const crossRoll = Math.random();
-      if (crossRoll < 0.68) {
-        const boxX = c.team === "HOME" ? PITCH_W - 9 : 9;
-        const boxY = CY + (Math.random() * 10 - 5);
-        this.triggerBanner("⚡", "UMPAN SILANG KE KOTAK PENALTI!", `${c.name} menusuk dari sayap dan melepas umpan silang akurat!`, 2.5);
-        this.ball.cross(new Vector2D(boxX, boxY), 1.25, 5.8);
-
-        const striker = this.agents.find((a) => a.team === c.team && a.slotCode === "ST");
-        if (striker) {
-          this.receiver = striker;
-          this.receiverTimer = 3.5;
-        }
-        this.decisionTimer = 1.8;
+    // Umpan silang dari sayap
+    if ((c.position.y < 16 || c.position.y > PITCH_H - 16) && depth > 68 && Math.random() < 0.68) {
+      const target = new Vector2D(goalPos.x - d * 9, CY + (Math.random() * 10 - 5));
+      const striker = this.agents.find((a) => a.team === att && a.slotCode === "ST" && a !== c);
+      if (striker) {
+        this.triggerBanner("⚡", "UMPAN SILANG!", `${c.name} melepas umpan silang ke kotak penalti`, 2.2);
+        this.crossTo(c, target, striker, 1.25, 5.8, "HEADER");
         return;
       }
     }
 
-    // C. PELUANG 3: Umpan Lambung Jauh dari Lini Belakang langsung ke Depan (Long Ball)
-    if (depth < 42 && (c.positionRole === "DF" || c.slotCode === "CM")) {
-      const longBallRoll = Math.random();
-      const longBallThreshold = this.tactic === "ATTACKING" ? 0.35 : 0.18;
-
-      if (longBallRoll < longBallThreshold) {
-        const targetFwd = this.agents.find((a) => a.team === c.team && a.positionRole === "FW");
-        if (targetFwd) {
-          this.triggerBanner("🚀", "SERANGAN BALIK KILAT!", `${c.name} mengirim umpan lambung melengkung jauh langsung ke garis depan!`, 2.5);
-          const targetLanding = targetFwd.position.clone().add(new Vector2D(d * 12, 0));
-          this.ball.cross(targetLanding, 1.5, 7.2);
-          this.receiver = targetFwd;
-          this.receiverTimer = 4.0;
-          this.decisionTimer = 1.6;
-          return;
-        }
+    // Umpan lambung jauh dari belakang langsung ke depan
+    if (depth < 42 && (c.positionRole === "DF" || c.slotCode === "CM") && Math.random() < (attacking ? 0.35 : 0.18)) {
+      const fwd = this.agents.find((a) => a.team === att && a.positionRole === "FW" && a !== c);
+      if (fwd) {
+        this.triggerBanner("🚀", "UMPAN JAUH!", `${c.name} mengirim bola panjang langsung ke lini depan`, 2.2);
+        this.crossTo(c, fwd.position.clone().add(new Vector2D(d * 12, 0)), fwd, 1.5, 7.2);
+        return;
       }
     }
 
-    // D. PELUANG 4: Umpan Terobosan / Through Ball Membelah Bek
-    if (depth > 50 && depth < 82 && (c.positionRole === "MF" || c.positionRole === "FW")) {
-      const forwardTarget = this.agents
-        .filter((a) => a.team === c.team && a !== c && a.positionRole === "FW")
+    // Umpan terobosan (bisa berujung offside)
+    if (depth > 50 && depth < 82 && c.positionRole !== "DF") {
+      const target = this.agents
+        .filter((a) => a.team === att && a !== c && a.positionRole === "FW")
         .sort((a, b) => (b.position.x - a.position.x) * d)[0];
-
-      if (forwardTarget && Math.random() < 0.42) {
-        // Cek apakah pemain berada di posisi offside saat umpan dilepas!
-        if (this.checkIsOffside(forwardTarget)) {
-          this.awardOffside(forwardTarget);
-          return;
-        }
-
-        const throughPoint = forwardTarget.position.clone().add(new Vector2D(d * 10, 0));
-        this.triggerBanner("🎯", "UMPAN TEROBOSAN!", `${c.name} melepaskan umpan terobosan manis membelah celah pertahanan!`, 2.0);
-        this.sendPass(forwardTarget, 23);
-        this.decisionTimer = 1.2;
+      if (target && Math.random() < 0.4) {
+        const offside = this.checkIsOffside(target);
+        const through = target.position.clone().add(new Vector2D(d * 9, 0));
+        this.triggerBanner("🎯", "UMPAN TEROBOSAN!", `${c.name} melepas bola terobosan ke ruang kosong`, 2.0);
+        this.passTo(through, target, 23);
+        if (offside) this.offsideFlag = target; // bendera baru naik saat bola tiba di kaki pemain
+        else if (Math.random() < 0.6) this.shotOnReceive = { player: target, kind: "CLOSE" };
         return;
       }
     }
 
-    // E. Default: Operan Reguler Kombinasi Tiki-Taka / Cari Kawan Kosong
     this.doNormalPass(c);
   }
 
+  /** Offside saat umpan dilepas: lebih maju dari bola dan dari bek kedua terakhir, di area lawan */
   private checkIsOffside(attacker: PlayerAgent): boolean {
-    const oppTeam = other(attacker.team);
     const d = dirOf(attacker.team);
-
-    // Ambil semua pemain bertahan lawan (kecuali kiper)
-    const oppDefenders = this.agents
-      .filter((a) => a.team === oppTeam && a.positionRole !== "GK")
+    const defenders = this.agents
+      .filter((a) => a.team !== attacker.team && a.positionRole !== "GK")
       .sort((a, b) => (d > 0 ? b.position.x - a.position.x : a.position.x - b.position.x));
-
-    if (oppDefenders.length < 2) return false;
-    const lastDefenderX = oppDefenders[0].position.x;
-
-    // Offside jika striker lebih maju dari bek terakhir di area pertahanan lawan
-    if (d > 0) {
-      return attacker.position.x > lastDefenderX && attacker.position.x > PITCH_W / 2;
-    } else {
-      return attacker.position.x < lastDefenderX && attacker.position.x < PITCH_W / 2;
-    }
+    if (defenders.length < 1) return false;
+    const line = defenders[0].position.x;
+    const ballX = this.ball.position.x;
+    const x = attacker.position.x;
+    if (d > 0) return x > line && x > ballX && x > PITCH_W / 2;
+    return x < line && x < ballX && x < PITCH_W / 2;
   }
 
-  private doNormalPass(c: PlayerAgent) {
+  private doNormalPass(c: PlayerAgent, speedOverride?: number) {
     const d = dirOf(c.team);
     let best: PlayerAgent | null = null;
     let bestScore = -Infinity;
@@ -610,14 +761,13 @@ export class MatchEngine {
       if (c.positionRole === "GK" ? t.positionRole !== "DF" : t.positionRole === "GK") continue;
       const dist = t.position.dist(c.position);
       if (dist < 6 || dist > 38) continue;
-
       let nearestOpp = 8;
       for (const o of this.agents) {
         if (o.team !== c.team) nearestOpp = Math.min(nearestOpp, o.position.dist(t.position));
       }
-
-      const fwd = (t.position.x - c.position.x) * d;
-      let score = fwd * 0.7 + nearestOpp * 1.4 - dist * 0.08 + Math.random() * 5;
+      const depth = c.team === "HOME" ? t.position.x : PITCH_W - t.position.x;
+      let score = (t.position.x - c.position.x) * d * 0.7 + nearestOpp * 1.4 - dist * 0.08 + Math.random() * 5;
+      if (depth > 84) score -= (depth - 84) * 3;
       if (score > bestScore) {
         bestScore = score;
         best = t;
@@ -628,72 +778,10 @@ export class MatchEngine {
       this.decisionTimer = 0.5;
       return;
     }
-    this.sendPass(best, clamp(15 + c.position.dist(best.position) * 0.5, 15, 27));
+    this.sendPass(best, speedOverride ?? clamp(15 + c.position.dist(best.position) * 0.5, 15, 27));
   }
 
-  // ---------------------------------------------------------------- SISTEM BOLA REBOUND KIPER
-  private scrambleRebound(attackingTeam: Team) {
-    const ballPos = this.ball.position;
-    // Cari penyerang dan bek terdekat dengan bola muntah
-    const attackers = this.agents
-      .filter((a) => a.team === attackingTeam && a.positionRole !== "GK")
-      .sort((a, b) => a.position.dist(ballPos) - b.position.dist(ballPos));
-
-    const striker = attackers[0];
-    if (!striker) return;
-
-    this.receiver = striker;
-    this.receiverTimer = 2.4;
-
-    setTimeout(() => {
-      if (this.ball.position.dist(striker.position) < 4.0) {
-        // Penyerang berhasil menyambar bola rebound!
-        const goalX = attackingTeam === "HOME" ? PITCH_W : 0;
-        this.triggerBanner("💥", "SAMBARAN BOLA REBOUND!", `${striker.name} menyambar bola muntah di muka gawang!`, 2.5);
-
-        const reboundOutcome = Math.random();
-        if (reboundOutcome < 0.55) {
-          // GOL REBOUND!
-          this.ball.shoot(new Vector2D(goalX, CY + (Math.random() * 4 - 2)), 32);
-          setTimeout(() => {
-            this.triggerBanner("⚽", "GOOOOL REBOUND!", `GOL! Sambaran kilat ${striker.name} merobek jala gawang!`, 3.5);
-            this.scoreSyntheticGoal(striker);
-          }, 320);
-        } else if (reboundOutcome < 0.85) {
-          // DOUBLE SAVE KIPER!
-          this.ball.deflect(attackingTeam === "HOME" ? Math.PI : 0, 7.5);
-          this.triggerBanner("🧤", "HEROIC DOUBLE SAVE!", `LUAR BIASA! Kiper bangkit dan melakukan penyelamatan ganda super dramatis!`, 3.5);
-        } else {
-          // Blok garis gawang bek
-          this.ball.deflect(Math.random() * Math.PI * 2, 8.0);
-          this.triggerBanner("🛡️", "BLOK GARIS GAWANG!", `Heroik! Bek lawan menyapu bola tepat di atas garis gawang!`, 3.0);
-        }
-      }
-    }, 850);
-  }
-
-  private scoreSyntheticGoal(scorer: PlayerAgent) {
-    const dummySeq: AttackSequence = {
-      id: `synthetic-${Date.now()}`,
-      minute: 0,
-      team: scorer.team,
-      buildupPlayer: scorer.name,
-      wingerPlayer: scorer.name,
-      finisherPlayer: scorer.name,
-      defenderPlayer: "Defender",
-      gkPlayer: "Goalkeeper",
-      outcome: "GOAL",
-      description: `GOOOOL! Gol brilian dicetak oleh ${scorer.name}!`,
-      isLoftedCross: false,
-      startCoord: { x: 50, y: 50 },
-      wingerCoord: { x: 50, y: 50 },
-      boxCoord: { x: 50, y: 50 },
-      finishCoord: { x: scorer.team === "HOME" ? 98 : 2, y: 50 },
-    };
-    this.scoreGoal(dummySeq);
-  }
-
-  // ---------------------------------------------------------------- SKENARIO SERANGAN TERSTRUKTUR
+  // ================================================================ SKENARIO SERANGAN BACKEND
 
   private startSequence(seq: AttackSequence) {
     const att = seq.team;
@@ -709,10 +797,9 @@ export class MatchEngine {
       if (seq.outcome === "GOAL") this.scoreGoal(seq);
       return;
     }
-
     this.run = {
       seq, step: "GATHER", t: 0, total: 0, sent: false, att, def, b, w, f, d, gk,
-      wingerPos: pm(seq.wingerCoord), boxPos: pm(seq.boxCoord), shotStart: new Vector2D(0, 0),
+      wingerPos: pm(seq.wingerCoord), boxPos: pm(seq.boxCoord),
     };
   }
 
@@ -758,15 +845,13 @@ export class MatchEngine {
       case "WING_RUN":
         if (r.seq.outcome === "TACKLED") {
           if (r.d.position.dist(r.w.position) < 1.8 || r.t > 3) {
-            this.triggerBanner("🛡️", "TEKEL BERSIH!", `${r.d.name} meluncur menghentikan tusukan ${r.w.name}`, 2.5);
+            this.triggerBanner("🛡️", "TEKEL BERSIH!", `${r.d.name} menghentikan tusukan ${r.w.name}`, 2.4);
             this.sendPass(r.d, 10);
             this.next(r, "AFTER");
           }
         } else if (r.w.position.dist(r.wingerPos) < 3.2 || r.t > 3.5) {
-          this.triggerBanner("⚡", "UMPAN SILANG AKURAT!", `${r.w.name} melepas umpan silang melambung ke kotak penalti!`, 2.5);
-          ball.cross(r.boxPos, 1.18, 5.6);
-          this.receiver = r.f;
-          this.receiverTimer = 5;
+          this.triggerBanner("⚡", "UMPAN SILANG AKURAT!", `${r.w.name} melepas umpan silang ke kotak penalti`, 2.4);
+          this.crossTo(r.w, r.boxPos, r.f, 1.18, 5.6);
           this.next(r, "CROSS_FLIGHT");
         }
         break;
@@ -777,129 +862,40 @@ export class MatchEngine {
         }
         break;
       case "SHOT_WAIT":
-        if (r.t > 0.4) this.fireShot(r);
+        if (r.t > 0.4) this.fireSeqShot(r);
         break;
       case "SHOT":
-        this.stepShot(r);
-        break;
-      case "REBOUND_SCRAMBLE":
-        this.stepReboundScramble(r, h);
-        break;
+        break; // ditangani stepShot()
       case "AFTER":
         if (r.t > 1.4) this.run = null;
         break;
     }
   }
 
-  private fireShot(r: SeqRun) {
+  /**
+   * Hasil skenario tetap mengikuti backend. Khusus GOL, cara penyajiannya bervariasi
+   * (tembakan langsung, bola muntah, atau penalti) tetapi jumlah gol TIDAK berubah.
+   */
+  private fireSeqShot(r: SeqRun) {
     const oc = r.seq.outcome;
-    const gx = r.att === "HOME" ? PITCH_W : 0;
-    let ty = pm(r.seq.finishCoord).y;
+    let forced: ShotOutcome = oc === "TACKLED" ? "WIDE" : (oc as ShotOutcome);
+    let reboundGoal = false;
 
-    if (oc === "GOAL") ty = clamp(ty, CY - 2.8, CY + 2.8);
-    else if (oc === "SAVED") ty = clamp(ty, CY - 2.2, CY + 2.2);
-    else if (oc === "POST") ty = ty < CY ? CY - GOAL_HALF : CY + GOAL_HALF;
-    else if (oc === "BLOCKED") ty = CY;
-
-    const start = this.ball.position.clone();
-    const line = new Vector2D(gx, ty);
-    const dir = Vector2D.sub(line, start).normalize();
-    const far = start.clone().add(Vector2D.mult(dir, start.dist(line) + 3));
-
-    this.ball.shoot(far, oc === "BLOCKED" ? 25 : 32);
-    r.shotStart = start;
-    this.next(r, "SHOT");
-  }
-
-  private stepShot(r: SeqRun) {
-    const ball = this.ball;
-    const pos = ball.position;
-    const dd = dirOf(r.att);
-    const gx = r.att === "HOME" ? PITCH_W : 0;
-    const toLine = Math.abs(gx - pos.x);
-    const back = dd > 0 ? Math.PI : 0;
-    const spread = (s: number) => back + (Math.random() - 0.5) * s;
-
-    if (r.t > 4) {
-      this.next(r, "AFTER");
-      return;
-    }
-
-    switch (r.seq.outcome) {
-      case "BLOCKED":
-        if (pos.dist(r.shotStart) > 3) {
-          this.triggerBanner("🛡️", "PELUANG DIBLOK!", `${r.d.name} meluncur melakukan blok krusial!`, 2.5);
-          ball.deflect(spread(1.8), 9);
-          this.next(r, "AFTER");
-        }
-        break;
-      case "SAVED":
-        if (toLine < 2.5) {
-          // BOLA DITEPIS -> MASUK KE FASE REBOUND SCRAMBLE!
-          this.triggerBanner("🧤", "PENYELAMATAN HEBAT!", `${r.gk.name} sigap menepis sepakan keras ${r.f.name}! Bola muntah di kotak penalti!`, 3.0);
-          ball.deflect(spread(1.6), 8);
-          r.reboundAttacker = r.f;
-          r.reboundTimer = 2.5;
-          this.next(r, "REBOUND_SCRAMBLE");
-        }
-        break;
-      case "POST":
-        if (toLine < 0.8) {
-          this.triggerBanner("💥", "MENGHANTAM TIANG!", `DENTUMAN KERAS! Tendangan ${r.f.name} membentur mistar gawang!`, 3.0);
-          ball.deflect(spread(1.0), 10);
-          this.next(r, "AFTER");
-        }
-        break;
-      case "GOAL":
-        if ((dd > 0 && pos.x > PITCH_W + 0.3) || (dd < 0 && pos.x < -0.3)) {
-          this.scoreGoal(r.seq);
-        }
-        break;
-      default: // WIDE
-        if ((dd > 0 && pos.x > PITCH_W + 1) || (dd < 0 && pos.x < -1)) {
-          this.triggerBanner("💨", "TEMBAKAN MELENCENG!", `Sepakan keras ${r.f.name} melambung tipis dari gawang`, 2.5);
-          this.awardGoalKick(r.def);
-          this.next(r, "AFTER");
-        }
-    }
-  }
-
-  // FASE REBOUND: Perebutan bola muntah di kotak penalti
-  private stepReboundScramble(r: SeqRun, h: number) {
-    if (!r.reboundTimer) r.reboundTimer = 2.5;
-    r.reboundTimer -= h;
-
-    const ball = this.ball;
-    const f = r.f;
-    const d = r.d;
-    const gk = r.gk;
-
-    f.setDesired(ball.position.x, ball.position.y, 1.0);
-    d.setDesired(ball.position.x, ball.position.y, 0.95);
-    gk.setDesired(ball.position.x, ball.position.y, 0.7);
-
-    if (f.position.dist(ball.position) < 2.0 && r.t > 0.6) {
-      // Striker mencapai bola rebound untuk tembakan kedua!
-      const goalX = r.att === "HOME" ? PITCH_W : 0;
-      this.triggerBanner("💥", "TEMBAKAN REBOUND KEDUA!", `${f.name} menyambar bola muntah!`, 2.5);
-
+    if (oc === "GOAL") {
       const roll = Math.random();
-      if (roll < 0.45) {
-        // GOL DARI BOLA REBOUND!
-        ball.shoot(new Vector2D(goalX, CY + (Math.random() * 4 - 2)), 30);
-        setTimeout(() => {
-          this.triggerBanner("⚽", "GOL REBOUND!", `GOL! Sambaran kilat ${f.name} merobek gawang!`, 3.5);
-          this.scoreGoal(r.seq);
-        }, 320);
-      } else {
-        // DOUBLE SAVE HEROIK DARI KIPER!
-        ball.deflect(r.att === "HOME" ? Math.PI : 0, 8);
-        this.triggerBanner("🧤", "DOUBLE SAVE SENSASIONAL!", `KIPER TERBANG! ${gk.name} menepis sambaran rebound secara ajaib!`, 3.5);
+      if (roll < 0.14) {
+        this.penaltyGoalSeq = r.seq;
+        this.run = null;
+        this.awardPenalty(r.att, r.f);
+        return;
       }
-      this.next(r, "AFTER");
-    } else if (r.reboundTimer <= 0) {
-      this.next(r, "AFTER");
+      if (roll < 0.4) {
+        reboundGoal = true;
+        forced = "SAVED";
+      }
     }
+    this.launchShot(r.f, "SEQ", forced, r.seq, { reboundGoal, blocker: r.d, gk: r.gk });
+    this.next(r, "SHOT");
   }
 
   private scoreGoal(seq: AttackSequence) {
@@ -910,24 +906,19 @@ export class MatchEngine {
       this.agents.find((a) => a.team === conceding && a.positionRole === "MF") ??
       this.agents[0];
 
-    this.ball.placeAt(PITCH_W / 2, CY);
-    this.receiver = null;
     this.run = null;
-    this.possession = conceding;
-    this.setPieceState = "KICK_OFF";
-    this.setPieceTaker = taker;
-    this.setPieceTimer = 3.2;
-    this.triggerBanner("⚽", "GOOOOL!", `Gol spektakuler untuk ${seq.team === "HOME" ? "Tim Tuan Rumah" : "Tim Tamu"}! Kick-off tengah lapangan`, 4.0);
+    this.shot = null;
+    this.guaranteedGoal = null;
+    this.beginSetPiece("KICK_OFF", new Vector2D(PITCH_W / 2, CY), taker, 3.2);
+    this.triggerBanner("⚽", "GOOOOL!", `${seq.finisherPlayer} mencetak gol untuk ${seq.team === "HOME" ? "tim tuan rumah" : "tim tamu"}!`, 4.0);
   }
 
-  // ---------------------------------------------------------------- TARGET TAKTIS SELURUH PEMAIN
+  // ================================================================ TARGET TAKTIS
 
   private assignTargets() {
     const ball = this.ball;
     const bp = ball.position;
     const teams: Team[] = ["HOME", "AWAY"];
-
-    // 1. Pemain Penekan (Pressing)
     const press: Record<Team, PlayerAgent | null> = { HOME: null, AWAY: null };
     const cover: Record<Team, PlayerAgent | null> = { HOME: null, AWAY: null };
 
@@ -947,16 +938,13 @@ export class MatchEngine {
       }
     }
 
-    // 2. Posisi dasar & penyesuaian taktik
     for (const a of this.agents) {
       const d = dirOf(a.team);
       const inPoss = this.possession === a.team;
-
       if (a.positionRole === "GK") {
         this.gkTarget(a, bp);
         continue;
       }
-
       const shift = clamp((bp.x - PITCH_W / 2) * 0.5, -20, 20);
       const tac = a.team === "HOME" ? (this.tactic === "ATTACKING" ? 6 : this.tactic === "DEFENSIVE" ? -6 : 0) : 0;
       const depthF = a.positionRole === "DF" ? 0.7 : 1;
@@ -983,14 +971,15 @@ export class MatchEngine {
       a.setDesired(x, clamp(y, 3, PITCH_H - 3), u);
     }
 
-    // 3. Pressing & Cover
     for (const team of teams) {
       const p = press[team];
       if (p) {
         const c = this.carrier && this.carrier.team !== team ? this.carrier : null;
-        const tx = c ? c.position.x + c.velocity.x * 0.4 : bp.x + ball.velocity.x * 0.2;
-        const ty = c ? c.position.y + c.velocity.y * 0.4 : bp.y + ball.velocity.y * 0.2;
-        p.setDesired(tx, ty, 1);
+        p.setDesired(
+          c ? c.position.x + c.velocity.x * 0.4 : bp.x + ball.velocity.x * 0.2,
+          c ? c.position.y + c.velocity.y * 0.4 : bp.y + ball.velocity.y * 0.2,
+          1
+        );
       }
       const cv = cover[team];
       if (cv) {
@@ -999,10 +988,9 @@ export class MatchEngine {
       }
     }
 
-    // 4. Pembawa bola menggiring maju
     const c = this.carrier;
     if (c) {
-      if (c.positionRole === "GK") {
+      if (c.positionRole === "GK" || this.pendingShot?.shooter === c) {
         c.setDesired(c.position.x, c.position.y, 0.2);
       } else {
         const d = dirOf(c.team);
@@ -1013,8 +1001,8 @@ export class MatchEngine {
     }
 
     this.applySequenceTargets();
+    this.applySetPieceTargets();
 
-    // 5. Penerima operan mengejar bola
     const r = this.receiver;
     if (r) {
       if (ball.mode === "CROSS") r.setDesired(ball.crossTarget.x, ball.crossTarget.y, 0.95);
@@ -1023,10 +1011,15 @@ export class MatchEngine {
   }
 
   private applySequenceTargets() {
+    const s = this.shot;
+    if (s?.blocker) {
+      const dd = dirOf(s.att);
+      s.blocker.setDesired(s.start.x + dd * 2.5, s.start.y + (CY - s.start.y) * 0.4, 1);
+    }
+
     const r = this.run;
     if (!r) return;
     const dd = dirOf(r.att);
-
     switch (r.step) {
       case "BUILDUP":
         r.b.setDesired(r.wingerPos.x - dd * 15, (r.b.position.y + r.wingerPos.y) / 2, 0.65);
@@ -1050,13 +1043,45 @@ export class MatchEngine {
         r.f.setDesired(r.f.position.x, r.f.position.y, 0.2);
         r.d.setDesired(r.f.position.x + dd * 2, r.f.position.y, 1);
         break;
-      case "SHOT":
-        r.d.setDesired(r.shotStart.x + dd * 2.5, r.shotStart.y + (CY - r.shotStart.y) * 0.4, 1);
-        break;
-      case "REBOUND_SCRAMBLE":
-        r.f.setDesired(this.ball.position.x, this.ball.position.y, 1.0);
-        r.d.setDesired(this.ball.position.x, this.ball.position.y, 0.9);
-        break;
+    }
+  }
+
+  /** Posisi pemain saat set piece: pagar betis, isi kotak penalti, kosongkan area penalti */
+  private applySetPieceTargets() {
+    const sp = this.setPieceState;
+    if (sp === "NONE" || sp === "KICK_OFF") return;
+    const taker = this.setPieceTaker;
+    const att = taker ? taker.team : this.possession;
+    const def = other(att);
+    const d = dirOf(att);
+    const gx = goalXOf(att);
+    const spot = this.placeTarget ?? this.ball.position;
+
+    if (sp === "PENALTY") {
+      for (const a of this.agents) {
+        if (a === taker || (a.team === def && a.positionRole === "GK")) continue;
+        a.setDesired(gx - d * 21, clamp(a.anchor.y, 6, PITCH_H - 6), 0.7);
+      }
+    } else if (sp === "CORNER") {
+      const attackers = this.agents.filter(
+        (a) => a.team === att && a !== taker && a.positionRole !== "GK" && (a.positionRole === "FW" || a.slotCode === "LCB" || a.slotCode === "RCB" || a.slotCode === "CM")
+      );
+      attackers.forEach((a, i) => a.setDesired(gx - d * (6 + (i % 3) * 3), CY + (i - (attackers.length - 1) / 2) * 3.4, 0.8));
+      const defenders = this.agents.filter((a) => a.team === def && a.positionRole !== "GK" && a.positionRole !== "FW");
+      defenders.forEach((a, i) => a.setDesired(gx - d * (5 + (i % 3) * 2.5), CY + (i - (defenders.length - 1) / 2) * 2.8, 0.8));
+    } else if (sp === "FREE_KICK") {
+      const goal = new Vector2D(gx, CY);
+      if (spot.dist(goal) < 38) {
+        const dir = Vector2D.sub(goal, spot).normalize();
+        const centre = spot.clone().add(Vector2D.mult(dir, 9.15));
+        const wall = this.agents
+          .filter((a) => a.team === def && a.positionRole !== "GK")
+          .sort((a, b) => a.position.dist(centre) - b.position.dist(centre))
+          .slice(0, 3);
+        wall.forEach((a, i) => a.setDesired(centre.x - dir.y * (i - 1) * 1.6, centre.y + dir.x * (i - 1) * 1.6, 1));
+        const runners = this.agents.filter((a) => a.team === att && a !== taker && a.positionRole === "FW");
+        runners.forEach((a, i) => a.setDesired(gx - d * (9 + i * 3), CY + (i - 1) * 5, 0.8));
+      }
     }
   }
 
@@ -1067,13 +1092,13 @@ export class MatchEngine {
     let gy = CY + (bp.y - CY) * 0.22;
     let urgent: number | undefined;
 
-    const r = this.run;
-    if (r && r.step === "SHOT" && r.def === a.team) {
+    const s = this.shot;
+    if (s && s.def === a.team) {
       const v = this.ball.velocity;
       if (Math.abs(v.x) > 0.1) {
         const yi = bp.y + (v.y / v.x) * (own - bp.x);
-        if (r.seq.outcome === "SAVED") gy = yi;
-        else if (r.seq.outcome === "GOAL") gy = yi + (yi > CY ? -4.5 : 4.5);
+        if (s.outcome === "SAVED") gy = yi;
+        else if (s.outcome === "GOAL") gy = yi + (yi > CY ? -4.5 : 4.5); // salah tebak / terlambat
         else gy = yi * 0.6 + CY * 0.4;
       }
       gx = own + d * 1;
