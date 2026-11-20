@@ -101,7 +101,8 @@ export default function PacksPage() {
         }
       }
 
-      const activeBuyer = address || user.walletAddress;
+      const activeBuyer = (address || user.walletAddress) as `0x${string}`;
+      if (!activeBuyer) throw new Error("Silakan hubungkan dompet MetaMask Anda terlebih dahulu.");
       setStatusMsg(`Menyiapkan voucher ${pack.name}...`);
       const { voucher } = await apiRequest<{
         voucher: {
@@ -126,17 +127,30 @@ export default function PacksPage() {
 
       const priceWei = BigInt(voucher.priceWei);
 
-      setStatusMsg(`Step 1/2: Menyetujui pembayaran ${pack.priceKans} KANS di MetaMask...`);
-      const approveTx = await writeContractAsync({
+      // 1. Cek apakah allowance KANS sudah cukup di blockchain
+      const currentAllowance = (await publicClient.readContract({
         address: CONTRACT_ADDRESSES.kansToken,
         abi: KANS_TOKEN_ABI,
-        functionName: "approve",
-        args: [CONTRACT_ADDRESSES.packShop, priceWei],
-        gas: BigInt(150000),
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        functionName: "allowance",
+        args: [activeBuyer, CONTRACT_ADDRESSES.packShop],
+      })) as bigint;
 
-      setStatusMsg("Step 2/2: Mencetak kartu NFT baru di blockchain (50% KANS di-burn)...");
+      // Hanya minta konfirmasi approve jika kuota belanja KANS belum cukup
+      if (currentAllowance < priceWei) {
+        setStatusMsg(`Menyetujui izin pembayaran KANS di MetaMask (hanya 1x)...`);
+        // Beri approval besar (1.000.000 KANS) agar pembelian Pack selanjutnya CUKUP 1 KALI KONFIRMASI!
+        const maxApproval = BigInt("1000000000000000000000000"); // 1.000.000 KANS
+        const approveTx = await writeContractAsync({
+          address: CONTRACT_ADDRESSES.kansToken,
+          abi: KANS_TOKEN_ABI,
+          functionName: "approve",
+          args: [CONTRACT_ADDRESSES.packShop, maxApproval],
+          gas: BigInt(150000),
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      }
+
+      setStatusMsg("Mencetak kartu NFT baru di blockchain (50% KANS di-burn)...");
       const openTx = await writeContractAsync({
         address: CONTRACT_ADDRESSES.packShop,
         abi: PACK_SHOP_ABI,
@@ -170,15 +184,49 @@ export default function PacksPage() {
       }
 
       if (mintedTokenId > 0) {
-        const confirm = await apiRequest<{ message: string; card: UserCardData }>(
-          "/packs/confirm",
-          {
-            method: "POST",
-            body: JSON.stringify({ tokenId: mintedTokenId }),
-          }
-        );
-        setRevealedCard(confirm.card);
-        setStatusMsg(confirm.message);
+        setStatusMsg("Menyinkronkan kartu baru ke akun Anda...");
+        const POS_MAP = ["GK", "DF", "MF", "FW"];
+        const RARITY_MAP = ["COMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC"];
+        const ED_MAP = ["BASE", "POTW", "HIGHLIGHT", "CLUB_SELECTION", "ICONIC"];
+
+        // Fallback instan: Tampilkan kartu langsung dari data voucher yang sudah sah dicetak
+        // sehingga user tidak terjebak layar kosong jika server sedang verifikasi di latar belakang!
+        const fallbackCard: any = {
+          id: `onchain-${mintedTokenId}`,
+          playerId: voucher.card.playerId,
+          position: POS_MAP[voucher.card.position] || "MF",
+          baseOverall: voucher.card.baseOverall,
+          level: 1,
+          rarity: RARITY_MAP[voucher.card.rarity] || "COMMON",
+          edition: ED_MAP[voucher.card.edition] || "BASE",
+          season: voucher.card.season,
+          isOnChain: true,
+          tokenId: mintedTokenId,
+          isListed: false,
+          player: {
+            id: voucher.card.playerId,
+            name: `Pemain #${voucher.card.playerId}`,
+            position: POS_MAP[voucher.card.position] || "MF",
+            overall: voucher.card.baseOverall,
+            club: { name: "Web3 FC", logoUrl: "" },
+          },
+        };
+
+        try {
+          const confirm = await apiRequest<{ message: string; card: UserCardData }>(
+            "/packs/confirm",
+            {
+              method: "POST",
+              body: JSON.stringify({ tokenId: mintedTokenId }),
+            }
+          );
+          setRevealedCard(confirm.card);
+          setStatusMsg(confirm.message);
+        } catch (confirmErr: any) {
+          console.warn("Konfirmasi server tertunda:", confirmErr);
+          setRevealedCard(fallbackCard);
+          setStatusMsg(`Selamat! Kartu NFT #${mintedTokenId} (${fallbackCard.rarity} - ${fallbackCard.edition}) berhasil dicetak!`);
+        }
       }
     } catch (err: any) {
       alert(err.shortMessage || err.message || "Gagal membuka Pack");

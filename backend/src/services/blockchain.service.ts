@@ -28,7 +28,10 @@ const MARKETPLACE_ABI = [
 ];
 
 function getProvider() {
-  return new ethers.JsonRpcProvider(env.rpcUrl);
+  const req = new ethers.FetchRequest(env.rpcUrl);
+  req.timeout = 7000; // Timeout 7 detik agar tidak gantung selamanya di Render
+  const network = env.chainId === 11155111 ? ethers.Network.from(11155111) : undefined;
+  return new ethers.JsonRpcProvider(req, network, { staticNetwork: network });
 }
 
 function getBackendSigner() {
