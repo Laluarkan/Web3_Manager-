@@ -153,23 +153,45 @@ export default function SquadPage() {
 
       setStatusMsg("Menunggu konfirmasi MetaMask untuk mencetak 11 NFT sekaligus...");
       const targetAccount = (address || user.walletAddress) as `0x${string}`;
+      const claimArgs = [
+        voucher.cards,
+        BigInt(voucher.nonce),
+        BigInt(voucher.deadline),
+        voucher.signature,
+      ] as const;
+
+      // Estimasi gas dinamis (11 mint butuh > 2,5 juta gas) sekaligus menampilkan alasan revert sebelum transaksi dikirim
+      let gas: bigint | undefined;
+      if (publicClient) {
+        try {
+          const estimated = await publicClient.estimateContractGas({
+            address: CONTRACT_ADDRESSES.cardNft,
+            abi: CARD_NFT_ABI,
+            functionName: "claimStarterPack",
+            args: claimArgs,
+            account: targetAccount,
+          });
+          gas = (estimated * BigInt(130)) / BigInt(100);
+        } catch (err: any) {
+          throw new Error(`Klaim ditolak kontrak: ${err.shortMessage || err.message}`);
+        }
+      }
+
       const txHash = await writeContractAsync({
         address: CONTRACT_ADDRESSES.cardNft,
         abi: CARD_NFT_ABI,
         functionName: "claimStarterPack",
-        args: [
-          voucher.cards,
-          BigInt(voucher.nonce),
-          BigInt(voucher.deadline),
-          voucher.signature,
-        ],
+        args: claimArgs,
         account: targetAccount,
-        gas: BigInt(2500000),
+        gas,
       });
 
       setStatusMsg("Transaksi dikirim! Menunggu konfirmasi blockchain...");
       if (publicClient) {
-        await publicClient.waitForTransactionReceipt({ hash: txHash });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        if (receipt.status !== "success") {
+          throw new Error("Transaksi gagal di blockchain (revert). Coba lagi untuk mendapatkan voucher baru.");
+        }
       }
 
       const confirm = await apiRequest<{ message: string }>("/squad/starter-pack/confirm-claim", {
