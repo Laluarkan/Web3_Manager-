@@ -223,7 +223,9 @@ export async function linkWallet(req: AuthRequest, res: Response) {
       where: { walletAddress: normalizedInput },
     });
     if (walletInUse && walletInUse.id !== user.id) {
-      res.status(409).json({ error: "Wallet ini sudah tertaut ke akun lain" });
+      res.status(409).json({
+        error: `Wallet ini (${normalizedInput.slice(0, 6)}...${normalizedInput.slice(-4)}) sudah tertaut ke akun "${walletInUse.email}" (${walletInUse.username}). Silakan login menggunakan akun tersebut atau gunakan dompet lain.`,
+      });
       return;
     }
 

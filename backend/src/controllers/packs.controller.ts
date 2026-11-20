@@ -191,24 +191,38 @@ export async function confirmPackOpen(req: AuthRequest, res: Response) {
 
     // Verifikasi langsung ke blockchain
     const onChain = await fetchOnChainCard(parsed.data.tokenId);
-    if (onChain.owner.toLowerCase() !== (walletAddress || "").toLowerCase()) {
-      // Sinkronkan alamat dompet jika kartu dicetak memakai akun MetaMask aktif
-      await prisma.user.update({
-        where: { id: userId },
-        data: { walletAddress: onChain.owner },
-      });
+
+    // Tentukan akun pemilik kartu di database:
+    // 1. Cek apakah alamat dompet pemilik NFT di blockchain sudah tertaut ke akun tertentu
+    const existingWalletOwner = await prisma.user.findUnique({
+      where: { walletAddress: onChain.owner.toLowerCase() },
+    });
+
+    let cardOwnerUserId = userId;
+    if (existingWalletOwner) {
+      cardOwnerUserId = existingWalletOwner.id;
+    } else if (!walletAddress) {
+      // Jika dompet ini belum terdaftar di akun manapun dan user saat ini belum punya wallet, tautkan
+      try {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { walletAddress: onChain.owner.toLowerCase() },
+        });
+      } catch (e) {
+        console.warn("Could not auto-link wallet to user:", e);
+      }
     }
 
     const saved = await prisma.userCard.upsert({
       where: { tokenId: onChain.tokenId },
       update: {
-        userId,
+        userId: cardOwnerUserId,
         isOnChain: true,
         isListed: false,
         level: onChain.level,
       },
       create: {
-        userId,
+        userId: cardOwnerUserId,
         playerId: onChain.playerId,
         position: onChain.position,
         baseOverall: onChain.baseOverall,
@@ -227,8 +241,10 @@ export async function confirmPackOpen(req: AuthRequest, res: Response) {
       message: `Selamat! Kamu mendapatkan ${saved.player.name} (${saved.rarity} - ${saved.edition})!`,
       card: saved,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Confirm pack open error:", err);
-    res.status(500).json({ error: "Gagal memverifikasi kartu Pack di blockchain" });
+    res.status(500).json({
+      error: `Gagal memverifikasi kartu Pack di blockchain: ${err?.message || "Kesalahan internal"}`,
+    });
   }
 }
